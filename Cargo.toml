@@ -1,0 +1,19 @@
+[package]
+name = "oh-my-agentloop"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of @mariozechner/pi-agent-core — a generic stateful agent loop framework"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+async-trait = "0.1"
+jsonschema = { version = "0.45.0", default-features = false }
+
+[dev-dependencies]
+tokio-test = "0.4"
