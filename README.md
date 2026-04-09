@@ -2,6 +2,10 @@
 
 Rust port of `@mariozechner/pi-agent-core` — a generic, embeddable agent loop runtime.
 
+## Origin
+
+This project is a Rust port of [pi-agent-core](https://github.com/badlogic/pi-mono/tree/main/packages/agent) by [Mario Zechner](https://github.com/badlogic), originally part of the `pi-mono` monorepo. It is distributed under the [MIT License](LICENSE).
+
 ## What it does
 
 `oh-my-agentloop` combines LLM streaming, tool orchestration, and event-driven state management into a single runtime that you can embed in any Rust application. You bring the model provider and tools; the runtime handles the loop.
