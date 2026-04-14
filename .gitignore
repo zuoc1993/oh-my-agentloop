@@ -1,5 +1,23 @@
-target
+# Build output
+target/
 
-.idea
+# IDE
+.idea/
+.claude/
+.vscode/
+*.swp
+*.swo
 
-.claude
+# macOS
+.DS_Store
+
+# Environment
+.env
+.env.local
+
+# Heap dumps / perf traces
+*.heapsnapshot
+*.trace.json
+
+# Lock file is intentional for binaries
+# Cargo.lock is committed for libraries only
