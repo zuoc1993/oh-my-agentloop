@@ -434,8 +434,10 @@ async fn abort_cancels_in_flight_run_and_clears_signal() {
         async move { a.prompt_text("hi", None).await }
     });
 
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    assert!(agent.signal().is_some());
+    common::wait_for(Duration::from_secs(1), "run has started", || {
+        agent.signal().is_some()
+    })
+    .await;
     assert!(!agent.signal().unwrap().is_cancelled());
 
     agent.abort();
@@ -444,9 +446,10 @@ async fn abort_cancels_in_flight_run_and_clears_signal() {
     let err = run.await.unwrap().unwrap_err();
     assert!(matches!(err, AgentError::Aborted));
 
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    assert!(agent.signal().is_none());
-    assert!(!agent.is_streaming());
+    common::wait_for(Duration::from_secs(1), "signal is cleared", || {
+        agent.signal().is_none() && !agent.is_streaming()
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -459,7 +462,10 @@ async fn abort_propagates_through_stream_request_cancel() {
         async move { agent.prompt_text("hello", None).await }
     });
 
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    common::wait_for(Duration::from_secs(1), "agent is streaming", || {
+        agent.is_streaming()
+    })
+    .await;
     agent.abort();
 
     let err = run.await.unwrap().unwrap_err();

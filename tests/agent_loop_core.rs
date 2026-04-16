@@ -32,6 +32,7 @@ fn event_types(events: &[AgentEvent]) -> Vec<&'static str> {
             AgentEvent::ToolExecutionStart { .. } => "tool_execution_start",
             AgentEvent::ToolExecutionUpdate { .. } => "tool_execution_update",
             AgentEvent::ToolExecutionEnd { .. } => "tool_execution_end",
+            _ => "unknown",
         })
         .collect()
 }

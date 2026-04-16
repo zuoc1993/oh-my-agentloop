@@ -44,8 +44,12 @@ pub struct ToolCallContent {
     pub arguments: serde_json::Value,
 }
 
+/// A single block of content inside an assistant turn.
+///
+/// Non-exhaustive: new block kinds (e.g. audio, file) may be added in minor releases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
+#[non_exhaustive]
 pub enum ContentBlock {
     Text(TextContent),
     Image(ImageContent),
@@ -53,7 +57,11 @@ pub enum ContentBlock {
     ToolCall(ToolCallContent),
 }
 
+/// Reason why the LLM stopped producing tokens for the current assistant turn.
+///
+/// Non-exhaustive: providers may expose new reasons over time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StopReason {
     Stop,
     Length,
@@ -128,17 +136,13 @@ pub struct Usage {
     pub cost: Cost,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Transport {
+    #[default]
     Sse,
     Ws,
-}
-
-impl Default for Transport {
-    fn default() -> Self {
-        Transport::Sse
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -187,9 +191,11 @@ impl Default for Model {
 }
 
 /// Thinking/reasoning level for models that support it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum ThinkingLevel {
+    #[default]
     Off,
     Minimal,
     Low,
@@ -197,12 +203,6 @@ pub enum ThinkingLevel {
     High,
     #[serde(rename = "xhigh")]
     XHigh,
-}
-
-impl Default for ThinkingLevel {
-    fn default() -> Self {
-        ThinkingLevel::Off
-    }
 }
 
 // ============================================================
@@ -343,9 +343,12 @@ pub struct LlmContext {
 /// Events yielded by the LLM stream function.
 ///
 /// Mirrors TypeScript `AssistantMessageEvent`: each incremental event carries the
-/// provider’s current `partial` [`AssistantMessage`]; the loop forwards that shape
+/// provider's current `partial` [`AssistantMessage`]; the loop forwards that shape
 /// to [`AgentEvent::MessageUpdate`] instead of reconstructing content locally.
+///
+/// Non-exhaustive: providers may emit new event kinds in minor releases.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum StreamEvent {
     Start {
         partial: AssistantMessage,
@@ -613,16 +616,12 @@ impl fmt::Debug for AgentContext {
 // Tool Execution Config
 // ============================================================
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ToolExecutionMode {
     Sequential,
+    #[default]
     Parallel,
-}
-
-impl Default for ToolExecutionMode {
-    fn default() -> Self {
-        ToolExecutionMode::Parallel
-    }
 }
 
 /// Snapshot of the agent context passed to tool hooks.
@@ -760,7 +759,14 @@ pub struct AgentLoopConfig {
 /// Events emitted by the agent loop for UI updates and state synchronization.
 ///
 /// Each run ends with exactly one explicit terminal event.
+///
+/// Non-exhaustive: new variants may be added in minor releases; match with `_ =>` arms.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
+// `MessageUpdate.stream_event` is the largest variant by design; the full provider payload
+// is carried through the event bus without cloning indirection. Consumers subscribe in
+// streaming paths where the extra stack size is acceptable.
+#[allow(clippy::large_enum_variant)]
 pub enum AgentEvent {
     AgentStart,
     RunCompleted {
@@ -811,7 +817,12 @@ pub enum AgentEvent {
 // Errors
 // ============================================================
 
+/// Errors returned by the agent runtime.
+///
+/// Non-exhaustive: new variants may be added in minor releases; downstream code
+/// should match with a trailing `_ =>` arm.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AgentError {
     #[error("Agent is already processing a prompt. Use steer() or follow_up() to queue messages.")]
     AlreadyProcessing,
@@ -831,11 +842,21 @@ pub enum AgentError {
     #[error("Task join error: {0}")]
     JoinError(String),
 
-    #[error("{0}")]
-    Other(#[from] anyhow::Error),
+    /// Invalid user-message content passed into the agent (e.g. wrong [`ContentBlock`] variants).
+    #[error("User content error: {0}")]
+    UserContent(#[from] UserContentBuildError),
+
+    /// Internal invariant violation. Always a bug.
+    #[error("Internal error: {0}")]
+    Internal(String),
 }
 
+/// Terminal outcome of a low-level run (`run_agent_loop` / `run_agent_loop_continue`).
+///
+/// Non-exhaustive: new outcome kinds may be added in minor releases.
 #[derive(Debug)]
+#[non_exhaustive]
+#[must_use = "observe the RunOutcome to know whether the run succeeded, failed, or was aborted"]
 pub enum RunOutcome {
     Completed {
         new_messages: Vec<AgentMessage>,
@@ -853,10 +874,16 @@ pub enum RunOutcome {
 // Internal: Event Emitter
 // ============================================================
 
+/// Boxed future alias used across event-driven callbacks.
+pub type BoxedUnitFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// Internal event handler function type — takes an [`AgentEvent`] and returns a boxed future.
+type EventHandlerFn = Arc<dyn Fn(AgentEvent) -> BoxedUnitFuture + Send + Sync>;
+
 /// Event emitter used by the agent loop.
 /// Wraps a callback that processes `AgentEvent`s.
 pub struct EventEmitter {
-    f: Arc<dyn Fn(AgentEvent) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>,
+    f: EventHandlerFn,
 }
 
 impl EventEmitter {

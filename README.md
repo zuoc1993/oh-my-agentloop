@@ -86,23 +86,16 @@ fn my_stream_fn() -> StreamFn {
 ```rust
 #[tokio::main]
 async fn main() {
-    let agent = Agent::new(AgentOptions {
-        initial_state: Some(InitialAgentState {
+    let options = AgentOptions::builder(my_stream_fn())
+        .initial_state(InitialAgentState {
             system_prompt: Some("You are a helpful assistant.".into()),
             model: Some(my_model()),
             thinking_level: Some(ThinkingLevel::Off),
             tools: Some(vec![]),
             messages: None,
-        }),
-        stream_fn: my_stream_fn(),
-        // All other fields default to None.
-        convert_to_llm: None, transform_context: None,
-        get_api_key: None, before_tool_call: None, after_tool_call: None,
-        steering_mode: None, follow_up_mode: None, session_id: None,
-        transport: None, tool_execution: None, api_key: None,
-        temperature: None, max_tokens: None, thinking_budgets: None,
-        max_retry_delay_ms: None, on_payload: None,
-    });
+        })
+        .build();
+    let agent = Agent::new(options);
 
     agent.prompt_text("Hello!", None).await.unwrap();
 

@@ -13,20 +13,32 @@ use tokio_util::sync::CancellationToken;
 use crate::agent_loop::{run_agent_loop, run_agent_loop_continue};
 use crate::types::*;
 
+/// Lock a `std::sync::Mutex`, unwrapping poison.
+///
+/// All critical sections in this module are short and do not panic, so a poisoned
+/// lock indicates a prior bug — unwrapping is acceptable and centralises the
+/// single site where we do so.
+#[inline]
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| {
+        #[cfg(feature = "tracing")]
+        tracing::error!(error = %e, "agent: mutex poisoned, recovering");
+        #[cfg(not(feature = "tracing"))]
+        let _ = &e;
+        e.into_inner()
+    })
+}
+
 // ============================================================
 // Queue Types
 // ============================================================
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum QueueMode {
     All,
+    #[default]
     OneAtATime,
-}
-
-impl Default for QueueMode {
-    fn default() -> Self {
-        QueueMode::OneAtATime
-    }
 }
 
 struct PendingMessageQueue {
@@ -103,6 +115,7 @@ impl MutableAgentState {
 // ============================================================
 
 /// Initial state for constructing an Agent.
+#[derive(Default)]
 pub struct InitialAgentState {
     pub system_prompt: Option<String>,
     pub model: Option<Model>,
@@ -111,19 +124,10 @@ pub struct InitialAgentState {
     pub messages: Option<Vec<AgentMessage>>,
 }
 
-impl Default for InitialAgentState {
-    fn default() -> Self {
-        InitialAgentState {
-            system_prompt: None,
-            model: None,
-            thinking_level: None,
-            tools: None,
-            messages: None,
-        }
-    }
-}
-
-/// Options for constructing an Agent.
+/// Options for constructing an [`Agent`].
+///
+/// Prefer the [`AgentOptions::builder`] fluent API; the public fields remain
+/// accessible for advanced use cases (e.g. serde-driven configuration).
 pub struct AgentOptions {
     pub initial_state: Option<InitialAgentState>,
     pub convert_to_llm: Option<ConvertToLlmFn>,
@@ -146,6 +150,128 @@ pub struct AgentOptions {
     pub on_payload: Option<OnPayloadFn>,
 }
 
+impl AgentOptions {
+    /// Start building an [`AgentOptions`] value. `stream_fn` is the only required field.
+    ///
+    /// ```ignore
+    /// let options = AgentOptions::builder(my_stream_fn())
+    ///     .initial_state(initial)
+    ///     .tool_execution(ToolExecutionMode::Parallel)
+    ///     .build();
+    /// ```
+    pub fn builder(stream_fn: StreamFn) -> AgentOptionsBuilder {
+        AgentOptionsBuilder::new(stream_fn)
+    }
+}
+
+/// Fluent builder for [`AgentOptions`].
+#[must_use = "call .build() to construct the AgentOptions"]
+pub struct AgentOptionsBuilder {
+    inner: AgentOptions,
+}
+
+impl AgentOptionsBuilder {
+    /// Create a new builder with only the required `stream_fn` field set.
+    pub fn new(stream_fn: StreamFn) -> Self {
+        Self {
+            inner: AgentOptions {
+                initial_state: None,
+                convert_to_llm: None,
+                transform_context: None,
+                stream_fn,
+                get_api_key: None,
+                before_tool_call: None,
+                after_tool_call: None,
+                steering_mode: None,
+                follow_up_mode: None,
+                session_id: None,
+                transport: None,
+                tool_execution: None,
+                api_key: None,
+                temperature: None,
+                max_tokens: None,
+                thinking_budgets: None,
+                max_retry_delay_ms: None,
+                on_payload: None,
+            },
+        }
+    }
+
+    pub fn initial_state(mut self, state: InitialAgentState) -> Self {
+        self.inner.initial_state = Some(state);
+        self
+    }
+    pub fn convert_to_llm(mut self, f: ConvertToLlmFn) -> Self {
+        self.inner.convert_to_llm = Some(f);
+        self
+    }
+    pub fn transform_context(mut self, f: TransformContextFn) -> Self {
+        self.inner.transform_context = Some(f);
+        self
+    }
+    pub fn get_api_key(mut self, f: GetApiKeyFn) -> Self {
+        self.inner.get_api_key = Some(f);
+        self
+    }
+    pub fn before_tool_call(mut self, f: BeforeToolCallHookFn) -> Self {
+        self.inner.before_tool_call = Some(f);
+        self
+    }
+    pub fn after_tool_call(mut self, f: AfterToolCallHookFn) -> Self {
+        self.inner.after_tool_call = Some(f);
+        self
+    }
+    pub fn steering_mode(mut self, mode: QueueMode) -> Self {
+        self.inner.steering_mode = Some(mode);
+        self
+    }
+    pub fn follow_up_mode(mut self, mode: QueueMode) -> Self {
+        self.inner.follow_up_mode = Some(mode);
+        self
+    }
+    pub fn session_id(mut self, id: impl Into<String>) -> Self {
+        self.inner.session_id = Some(id.into());
+        self
+    }
+    pub fn transport(mut self, t: Transport) -> Self {
+        self.inner.transport = Some(t);
+        self
+    }
+    pub fn tool_execution(mut self, mode: ToolExecutionMode) -> Self {
+        self.inner.tool_execution = Some(mode);
+        self
+    }
+    pub fn api_key(mut self, key: impl Into<String>) -> Self {
+        self.inner.api_key = Some(key.into());
+        self
+    }
+    pub fn temperature(mut self, t: f64) -> Self {
+        self.inner.temperature = Some(t);
+        self
+    }
+    pub fn max_tokens(mut self, n: u64) -> Self {
+        self.inner.max_tokens = Some(n);
+        self
+    }
+    pub fn thinking_budgets(mut self, b: ThinkingBudgets) -> Self {
+        self.inner.thinking_budgets = Some(b);
+        self
+    }
+    pub fn max_retry_delay_ms(mut self, ms: u64) -> Self {
+        self.inner.max_retry_delay_ms = Some(ms);
+        self
+    }
+    pub fn on_payload(mut self, f: OnPayloadFn) -> Self {
+        self.inner.on_payload = Some(f);
+        self
+    }
+
+    /// Finish building the [`AgentOptions`] value.
+    pub fn build(self) -> AgentOptions {
+        self.inner
+    }
+}
+
 // ============================================================
 // Agent Listener
 // ============================================================
@@ -155,6 +281,10 @@ type ListenerFn = Arc<
 >;
 
 /// Subscription handle. Dropping it unsubscribes.
+///
+/// Drop it only after you no longer need the event stream; keeping the handle alive
+/// is the only way to receive further [`AgentEvent`]s.
+#[must_use = "Subscription unsubscribes on drop; keep it alive to receive events"]
 pub struct Subscription {
     inner: Arc<AgentInner>,
     listener: ListenerFn,
@@ -270,50 +400,63 @@ impl Agent {
     // ---- Public State Access ----
 
     pub fn state(&self) -> AgentState {
-        self.inner.state.lock().unwrap().snapshot()
+        self.with_state(MutableAgentState::snapshot)
     }
 
     pub fn is_streaming(&self) -> bool {
-        self.inner.state.lock().unwrap().is_streaming
+        self.with_state(|s| s.is_streaming)
     }
 
     pub fn pending_tool_calls(&self) -> HashSet<String> {
-        self.inner.state.lock().unwrap().pending_tool_calls.clone()
+        self.with_state(|s| s.pending_tool_calls.clone())
     }
 
     // ---- Mutable State Setters ----
+    //
+    // Setters mutate state *without* emitting `AgentEvent`s. Subscribed UIs should
+    // treat these as explicit, user-initiated changes and re-render on their own.
 
     pub fn set_system_prompt(&self, prompt: String) {
-        self.inner.state.lock().unwrap().system_prompt = prompt;
+        self.with_state_mut(|s| s.system_prompt = prompt);
     }
 
     pub fn set_model(&self, model: Model) {
-        self.inner.state.lock().unwrap().model = model;
+        self.with_state_mut(|s| s.model = model);
     }
 
     pub fn set_thinking_level(&self, level: ThinkingLevel) {
-        self.inner.state.lock().unwrap().thinking_level = level;
+        self.with_state_mut(|s| s.thinking_level = level);
     }
 
     pub fn set_tools(&self, tools: Vec<Arc<dyn AgentTool>>) {
-        self.inner.state.lock().unwrap().tools = tools;
+        self.with_state_mut(|s| s.tools = tools);
     }
 
     pub fn set_messages(&self, messages: Vec<AgentMessage>) {
-        self.inner.state.lock().unwrap().messages = messages;
+        self.with_state_mut(|s| s.messages = messages);
     }
 
     pub fn set_before_tool_call(&self, hook: Option<BeforeToolCallHookFn>) {
-        *self.inner.before_tool_call.lock().unwrap() = hook;
+        *lock(&self.inner.before_tool_call) = hook;
     }
 
     pub fn set_after_tool_call(&self, hook: Option<AfterToolCallHookFn>) {
-        *self.inner.after_tool_call.lock().unwrap() = hook;
+        *lock(&self.inner.after_tool_call) = hook;
     }
 
     /// Update the session id forwarded to the stream function on subsequent runs.
     pub fn set_session_id(&self, session_id: String) {
-        *self.inner.session_id.lock().unwrap() = Some(session_id);
+        *lock(&self.inner.session_id) = Some(session_id);
+    }
+
+    // ---- Internal Locking Helpers ----
+
+    fn with_state<R>(&self, f: impl FnOnce(&MutableAgentState) -> R) -> R {
+        f(&lock(&self.inner.state))
+    }
+
+    fn with_state_mut<R>(&self, f: impl FnOnce(&mut MutableAgentState) -> R) -> R {
+        f(&mut lock(&self.inner.state))
     }
 
     // ---- Queue Mode ----
@@ -441,8 +584,7 @@ impl Agent {
             }
         }
         let message = AgentMessage::User(UserMessage {
-            content: UserContent::try_from_llm_blocks(content)
-                .map_err(|e| AgentError::Other(anyhow::anyhow!(e)))?,
+            content: UserContent::try_from_llm_blocks(content)?,
             timestamp: now_millis(),
         });
         self.prompt(vec![message]).await
@@ -705,7 +847,7 @@ impl Agent {
             .lock()
             .unwrap()
             .clone()
-            .unwrap_or_else(CancellationToken::new);
+            .unwrap_or_default();
 
         let listeners: Vec<ListenerFn> = self.inner.listeners.lock().unwrap().clone();
         for listener in &listeners {
