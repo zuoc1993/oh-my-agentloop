@@ -161,6 +161,15 @@ fn failure_from_terminal_message(message: &AssistantMessage) -> AgentError {
 /// The prompts are added to the context and events are emitted for them.
 ///
 /// Returns the new messages produced during this run.
+#[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(
+        level = "info",
+        name = "agent.run",
+        skip(context, config, emitter, cancel, stream_fn),
+        fields(model = %config.model.id, prompts = prompts.len())
+    )
+)]
 pub async fn run_agent_loop(
     prompts: Vec<AgentMessage>,
     context: AgentContext,
@@ -235,10 +244,11 @@ pub async fn run_agent_loop(
             )
             .await;
 
-            let failure_message = new_messages
-                .last()
-                .cloned()
-                .expect("failure assistant message must be appended");
+            let failure_message = new_messages.last().cloned().ok_or_else(|| {
+                AgentError::Internal(
+                    "run_agent_loop: failure assistant message was not appended".to_string(),
+                )
+            })?;
             emitter
                 .emit(AgentEvent::TurnEnd {
                     message: failure_message,
@@ -260,6 +270,15 @@ pub async fn run_agent_loop(
 ///
 /// The last message in context must convert to a `user` or `toolResult` message
 /// via `convert_to_llm`. If it doesn't, the LLM provider will reject the request.
+#[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(
+        level = "info",
+        name = "agent.run.continue",
+        skip(context, config, emitter, cancel, stream_fn),
+        fields(model = %config.model.id, ctx_messages = context.messages.len())
+    )
+)]
 pub async fn run_agent_loop_continue(
     context: AgentContext,
     config: AgentLoopConfig,
@@ -323,10 +342,12 @@ pub async fn run_agent_loop_continue(
             )
             .await;
 
-            let failure_message = new_messages
-                .last()
-                .cloned()
-                .expect("failure assistant message must be appended");
+            let failure_message = new_messages.last().cloned().ok_or_else(|| {
+                AgentError::Internal(
+                    "run_agent_loop_continue: failure assistant message was not appended"
+                        .to_string(),
+                )
+            })?;
             emitter
                 .emit(AgentEvent::TurnEnd {
                     message: failure_message,
@@ -347,6 +368,15 @@ pub async fn run_agent_loop_continue(
 // Main Loop Logic (mirrors agent-loop.ts runLoop)
 // ============================================================
 
+#[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(
+        level = "debug",
+        name = "agent.run.loop",
+        skip_all,
+        fields(model = %config.model.id)
+    )
+)]
 async fn run_loop(
     current_context: &mut AgentContext,
     new_messages: &mut Vec<AgentMessage>,
@@ -499,6 +529,15 @@ async fn run_loop(
 // Stream Assistant Response (mirrors agent-loop.ts streamAssistantResponse)
 // ============================================================
 
+#[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(
+        level = "debug",
+        name = "agent.llm.stream",
+        skip_all,
+        fields(model = %config.model.id)
+    )
+)]
 async fn stream_assistant_response(
     context: &mut AgentContext,
     config: &AgentLoopConfig,
@@ -623,6 +662,12 @@ async fn stream_assistant_response(
                 if message.stop_reason != StopReason::Aborted {
                     message.stop_reason = StopReason::Error;
                 }
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    model = %config.model.id,
+                    stop_reason = ?message.stop_reason,
+                    "provider stream reported an error"
+                );
                 let message = normalize_terminal_assistant_message(message);
                 finalize_stream_message(context, &message, added_partial, emitter).await;
                 return Ok(message);
@@ -665,6 +710,15 @@ async fn stream_assistant_response(
 // Tool Execution (mirrors agent-loop.ts executeToolCalls*)
 // ============================================================
 
+#[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(
+        level = "debug",
+        name = "agent.tools.execute",
+        skip_all,
+        fields(mode = ?config.tool_execution, tool_calls = tool_calls.len())
+    )
+)]
 async fn execute_tool_calls(
     context: &AgentContext,
     assistant_message: &AssistantMessage,
@@ -870,9 +924,12 @@ async fn execute_tool_calls_parallel(
     let mut handle_iter = handles.into_iter();
     for (index, prepared) in runnable_calls.iter().enumerate() {
         if index < spawned_count {
-            let handle = handle_iter
-                .next()
-                .expect("spawned handles must match spawned prepared calls");
+            let handle = handle_iter.next().ok_or_else(|| {
+                AgentError::Internal(
+                    "execute_tool_calls_parallel: spawned handles and prepared calls desynchronized"
+                        .to_string(),
+                )
+            })?;
             let executed = handle
                 .await
                 .map_err(|e| AgentError::JoinError(e.to_string()))?;
@@ -1006,19 +1063,16 @@ async fn prepare_tool_call(
             },
         };
 
-        match before_hook(hook_context, cancel.clone()).await {
-            Some(BeforeToolCallResult {
-                block: true,
-                reason,
-            }) => {
-                let reason_text =
-                    reason.unwrap_or_else(|| "Tool execution was blocked".to_string());
-                return ToolCallPreparation::Immediate {
-                    result: create_error_tool_result(&reason_text),
-                    is_error: true,
-                };
-            }
-            _ => {}
+        if let Some(BeforeToolCallResult {
+            block: true,
+            reason,
+        }) = before_hook(hook_context, cancel.clone()).await
+        {
+            let reason_text = reason.unwrap_or_else(|| "Tool execution was blocked".to_string());
+            return ToolCallPreparation::Immediate {
+                result: create_error_tool_result(&reason_text),
+                is_error: true,
+            };
         }
     }
 
@@ -1035,6 +1089,15 @@ async fn prepare_tool_call(
 }
 
 /// Core tool execution — no agent context. Safe to spawn; uses `emitter` for `on_update` events.
+#[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(
+        level = "debug",
+        name = "agent.tool.call",
+        skip_all,
+        fields(tool = %tool.name(), tool_call_id = %tool_call.id)
+    )
+)]
 async fn execute_tool_call_core(
     tool: &dyn AgentTool,
     tool_call: &ToolCallContent,
@@ -1282,5 +1345,136 @@ fn create_error_assistant_message(model: &Model, error: &str) -> AssistantMessag
         error_message: Some(error.to_string()),
         usage: Usage::default(),
         timestamp: now_millis(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn mk_model() -> Model {
+        Model {
+            id: "m".into(),
+            name: "m".into(),
+            api: "openai-responses".into(),
+            provider: "mock".into(),
+            base_url: "https://example.invalid".into(),
+            reasoning: false,
+            input: vec!["text".into()],
+            cost: ModelCost::default(),
+            context_window: 1,
+            max_tokens: 1,
+        }
+    }
+
+    fn mk_assistant(stop: StopReason, err: Option<&str>) -> AssistantMessage {
+        AssistantMessage {
+            content: vec![],
+            model: "m".into(),
+            provider: "mock".into(),
+            api: "openai-responses".into(),
+            response_id: None,
+            stop_reason: stop,
+            error_message: err.map(|s| s.to_string()),
+            usage: Usage::default(),
+            timestamp: 0,
+        }
+    }
+
+    #[test]
+    fn normalize_aborted_adds_default_error_message() {
+        let msg = normalize_terminal_assistant_message(mk_assistant(StopReason::Aborted, None));
+        assert_eq!(msg.error_message.as_deref(), Some("Aborted"));
+    }
+
+    #[test]
+    fn normalize_error_adds_default_error_message() {
+        let msg = normalize_terminal_assistant_message(mk_assistant(StopReason::Error, None));
+        assert_eq!(msg.error_message.as_deref(), Some("Unknown stream error"));
+    }
+
+    #[test]
+    fn normalize_preserves_existing_error_message() {
+        let msg =
+            normalize_terminal_assistant_message(mk_assistant(StopReason::Error, Some("custom")));
+        assert_eq!(msg.error_message.as_deref(), Some("custom"));
+    }
+
+    #[test]
+    fn normalize_noop_for_stop_without_error() {
+        let msg = normalize_terminal_assistant_message(mk_assistant(StopReason::Stop, None));
+        assert!(msg.error_message.is_none());
+    }
+
+    #[test]
+    fn terminal_error_message_finds_trailing_error() {
+        let model = mk_model();
+        let messages = vec![AgentMessage::Assistant(create_error_assistant_message(
+            &model, "boom",
+        ))];
+        assert_eq!(
+            terminal_error_message(&messages, StopReason::Error).as_deref(),
+            Some("boom"),
+        );
+    }
+
+    #[test]
+    fn terminal_error_message_returns_none_for_non_terminal() {
+        let messages = vec![AgentMessage::Assistant(mk_assistant(
+            StopReason::Stop,
+            None,
+        ))];
+        assert!(terminal_error_message(&messages, StopReason::Error).is_none());
+    }
+
+    struct RejectingTool;
+
+    #[async_trait::async_trait]
+    impl AgentTool for RejectingTool {
+        fn name(&self) -> &str {
+            "nope"
+        }
+        fn label(&self) -> &str {
+            "nope"
+        }
+        fn description(&self) -> &str {
+            "no"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({
+                "type": "object",
+                "properties": { "x": { "type": "integer" } },
+                "required": ["x"],
+                "additionalProperties": false,
+            })
+        }
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            _params: serde_json::Value,
+            _cancel: CancellationToken,
+            _on_update: Option<Box<dyn Fn(AgentToolResult) + Send + Sync>>,
+        ) -> Result<AgentToolResult, AgentError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn validate_tool_arguments_accepts_valid() {
+        let tool = RejectingTool;
+        let ok = validate_tool_arguments(&tool, &json!({ "x": 42 }));
+        assert_eq!(ok.unwrap(), json!({ "x": 42 }));
+    }
+
+    #[test]
+    fn validate_tool_arguments_rejects_missing_required_field() {
+        let tool = RejectingTool;
+        let err = validate_tool_arguments(&tool, &json!({})).unwrap_err();
+        assert!(
+            err.contains("Validation failed for tool \"nope\"")
+                && err.contains("required property"),
+            "unexpected error: {err}"
+        );
     }
 }

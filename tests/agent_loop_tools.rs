@@ -34,10 +34,7 @@ fn echo_parameters_schema() -> Value {
 
 fn assistant_with_tool_calls(model: &Model, calls: Vec<ToolCallContent>) -> AssistantMessage {
     AssistantMessage {
-        content: calls
-            .into_iter()
-            .map(|tc| ContentBlock::ToolCall(tc))
-            .collect(),
+        content: calls.into_iter().map(ContentBlock::ToolCall).collect(),
         model: model.id.clone(),
         provider: model.provider.clone(),
         api: model.api.clone(),
@@ -793,7 +790,7 @@ async fn steering_messages_injected_only_after_all_tool_calls_finish() {
         let ex = executed_for_steering.lock().unwrap().clone();
         let qd = qd.clone();
         Box::pin(async move {
-            if ex.len() >= 1 && qd.load(Ordering::SeqCst) == 0 {
+            if !ex.is_empty() && qd.load(Ordering::SeqCst) == 0 {
                 qd.fetch_add(1, Ordering::SeqCst);
                 return vec![user_message("interrupt")];
             }

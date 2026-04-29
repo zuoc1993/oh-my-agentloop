@@ -367,6 +367,7 @@ async fn pending_tool_calls_tracks_active_execution_then_clears() {
     let second = assistant_text("The result is 56088.", &model);
     let stream_fn = stream_two_rounds(first, second);
 
+    #[allow(clippy::type_complexity)]
     let snapshots: Arc<Mutex<Vec<(String, Vec<String>)>>> = Arc::new(Mutex::new(Vec::new()));
 
     let mut opts = agent_options(stream_fn);

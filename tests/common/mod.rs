@@ -18,6 +18,26 @@ pub fn json_value<T: Serialize>(v: &T) -> serde_json::Value {
     serde_json::to_value(v).expect("serialize")
 }
 
+/// Poll `cond` every 5ms up to `timeout`; panic if it never becomes true.
+///
+/// Prefer this over `tokio::time::sleep(X).await; assert!(cond);` which races
+/// with the event being observed and is flaky on busy CI runners.
+pub async fn wait_for<F>(timeout: Duration, label: &str, mut cond: F)
+where
+    F: FnMut() -> bool,
+{
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if cond() {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("wait_for timed out after {timeout:?}: {label}");
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 pub fn test_model() -> Model {
     Model {
         id: "mock".into(),
