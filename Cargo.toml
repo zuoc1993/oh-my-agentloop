@@ -1,13 +1,13 @@
 [package]
 name = "oh-my-agentloop"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Generic stateful agent loop runtime — Rust port of @mariozechner/pi-agent-core"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/zuoc/oh-my-agentloop"
-homepage = "https://github.com/zuoc/oh-my-agentloop"
+repository = "https://github.com/zuoc1993/oh-my-agentloop"
+homepage = "https://github.com/zuoc1993/oh-my-agentloop"
 documentation = "https://docs.rs/oh-my-agentloop"
 keywords = ["agent", "llm", "ai", "tools", "async"]
 categories = ["asynchronous", "api-bindings"]
