@@ -2,7 +2,7 @@
 name = "oh-my-agentloop"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.95"
 description = "Generic stateful agent loop runtime — Rust port of @mariozechner/pi-agent-core"
 license = "MIT"
 readme = "README.md"
