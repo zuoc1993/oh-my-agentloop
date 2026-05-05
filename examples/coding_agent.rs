@@ -934,10 +934,10 @@ async fn main() {
                             eprint!("\x1b[90m{delta}\x1b[0m");
                             let _ = std::io::Write::flush(&mut std::io::stderr());
                         }
-                        StreamEvent::TextStart { .. } => {
-                            if has_thinking.swap(false, Ordering::Relaxed) {
-                                println!();
-                            }
+                        StreamEvent::TextStart { .. }
+                            if has_thinking.swap(false, Ordering::Relaxed) =>
+                        {
+                            println!();
                         }
                         StreamEvent::TextDelta { delta, .. } => {
                             print!("{delta}");
