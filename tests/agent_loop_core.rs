@@ -12,7 +12,8 @@ use common::{
 use oh_my_agentloop::{
     agent_loop, agent_loop_continue, run_agent_loop_continue, AgentContext, AgentError, AgentEvent,
     AgentMessage, AssistantMessage, ContentBlock, ConvertToLlmFn, GetApiKeyFn, OnPayloadFn,
-    RunOutcome, StopReason, StreamEvent, StreamFn, StreamOptions, TextContent, Transport, Usage,
+    RunOutcome, StopReason, StreamEvent, StreamFn, StreamFnAdapter, StreamOptions, TextContent,
+    Transport, Usage,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -43,7 +44,7 @@ async fn prompt_path_emits_expected_event_sequence_for_done_only_stream() {
     let config = base_loop_config(model.clone(), identity_convert());
     let ctx = AgentContext {
         system_prompt: "You are helpful.".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![],
     };
     let prompt = user_message("Hello");
@@ -104,7 +105,7 @@ async fn transform_context_runs_before_convert_to_llm() {
     config.transform_context = Some(transform);
     let ctx = AgentContext {
         system_prompt: "".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![],
     };
     let cancel = CancellationToken::new();
@@ -139,7 +140,7 @@ async fn follow_up_messages_run_only_after_agent_would_stop() {
     config.get_follow_up_messages = Some(get_follow_up);
     let ctx = AgentContext {
         system_prompt: "".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![],
     };
     let cancel = CancellationToken::new();
@@ -209,11 +210,11 @@ async fn stream_options_include_resolved_key_session_transport_temperature_token
     });
     let ctx = AgentContext {
         system_prompt: "sys".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![],
     };
     let cancel = CancellationToken::new();
-    let rx = agent_loop(vec![user_message("hi")], ctx, config, cancel, stream_fn);
+    let rx = agent_loop(vec![user_message("hi")], ctx, config, cancel, Arc::new(StreamFnAdapter(stream_fn)));
     collect_loop_events(rx).await;
     let opts = captured.lock().unwrap().take().expect("options captured");
     assert_eq!(opts.api_key.as_deref(), Some("key-from-fn"));
@@ -236,7 +237,7 @@ async fn message_update_uses_provider_partial_from_stream_event() {
     let config = base_loop_config(model.clone(), identity_convert());
     let ctx = AgentContext {
         system_prompt: "".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![],
     };
     let cancel = CancellationToken::new();
@@ -291,7 +292,7 @@ async fn agent_loop_continue_rejects_empty_context_before_spawn() {
     let config = base_loop_config(model, identity_convert());
     let ctx = AgentContext {
         system_prompt: "".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![],
     };
     let err = agent_loop_continue(
@@ -323,10 +324,10 @@ async fn agent_loop_continue_rejects_assistant_tail() {
     let config = base_loop_config(model.clone(), identity_convert());
     let ctx = AgentContext {
         system_prompt: "".into(),
-        messages: vec![
+        messages: Arc::new(vec![
             user_message("u"),
             AgentMessage::Assistant(assistant_text("a", &model)),
-        ],
+        ]),
         tools: vec![],
     };
     let err = agent_loop_continue(
@@ -345,7 +346,7 @@ async fn run_agent_loop_continue_emits_only_new_assistant_message_events() {
     let config = base_loop_config(model.clone(), identity_convert());
     let ctx = AgentContext {
         system_prompt: "".into(),
-        messages: vec![user_message("Hello")],
+        messages: Arc::new(vec![user_message("Hello")]),
         tools: vec![],
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -357,7 +358,7 @@ async fn run_agent_loop_continue_emits_only_new_assistant_message_events() {
     });
     let cancel = CancellationToken::new();
     let stream_fn = stream_done_only(assistant_text("Response", &model));
-    let outcome = run_agent_loop_continue(ctx, config, &emitter, cancel, &stream_fn)
+        let outcome = run_agent_loop_continue(ctx, config, &emitter, cancel, &*stream_fn)
         .await
         .expect("continue ok");
     let RunOutcome::Completed {

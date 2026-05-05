@@ -25,7 +25,7 @@ pub fn agent_loop(
     context: AgentContext,
     config: AgentLoopConfig,
     cancel: CancellationToken,
-    stream_fn: StreamFn,
+    stream_provider: Arc<dyn StreamProvider>,
 ) -> mpsc::UnboundedReceiver<AgentEvent> {
     let (tx, rx) = mpsc::unbounded_channel();
 
@@ -37,7 +37,7 @@ pub fn agent_loop(
             }
         });
 
-        let _ = run_agent_loop(prompts, context, config, &emitter, cancel, &stream_fn).await;
+        let _ = run_agent_loop(prompts, context, config, &emitter, cancel, &*stream_provider).await;
     });
 
     rx
@@ -48,7 +48,7 @@ pub fn agent_loop_continue(
     context: AgentContext,
     config: AgentLoopConfig,
     cancel: CancellationToken,
-    stream_fn: StreamFn,
+    stream_provider: Arc<dyn StreamProvider>,
 ) -> Result<mpsc::UnboundedReceiver<AgentEvent>, AgentError> {
     if context.messages.is_empty() {
         return Err(AgentError::NoMessages);
@@ -67,7 +67,7 @@ pub fn agent_loop_continue(
             }
         });
 
-        let _ = run_agent_loop_continue(context, config, &emitter, cancel, &stream_fn).await;
+        let _ = run_agent_loop_continue(context, config, &emitter, cancel, &*stream_provider).await;
     });
 
     Ok(rx)
@@ -86,15 +86,15 @@ enum LoopExit {
 async fn append_failure_message(
     model: &Model,
     current_context: &mut AgentContext,
-    new_messages: &mut Vec<AgentMessage>,
+    new_messages: &mut Arc<Vec<AgentMessage>>,
     emitter: &EventEmitter,
     error: &AgentError,
 ) {
     let failure_message =
         AgentMessage::Assistant(create_error_assistant_message(model, &error.to_string()));
 
-    current_context.messages.push(failure_message.clone());
-    new_messages.push(failure_message.clone());
+    Arc::make_mut(&mut current_context.messages).push(failure_message.clone());
+    Arc::make_mut(new_messages).push(failure_message.clone());
 
     emitter
         .emit(AgentEvent::MessageStart {
@@ -113,7 +113,7 @@ async fn emit_terminal_event(emitter: &EventEmitter, outcome: &RunOutcome) {
         RunOutcome::Completed { new_messages } => {
             emitter
                 .emit(AgentEvent::RunCompleted {
-                    messages: new_messages.clone(),
+                    messages: new_messages.to_vec(),
                 })
                 .await;
         }
@@ -123,7 +123,7 @@ async fn emit_terminal_event(emitter: &EventEmitter, outcome: &RunOutcome) {
         } => {
             emitter
                 .emit(AgentEvent::RunFailed {
-                    messages: new_messages.clone(),
+                    messages: new_messages.to_vec(),
                     error_message: terminal_error_message(new_messages, StopReason::Error)
                         .unwrap_or_else(|| error.to_string()),
                 })
@@ -132,7 +132,7 @@ async fn emit_terminal_event(emitter: &EventEmitter, outcome: &RunOutcome) {
         RunOutcome::Aborted { new_messages } => {
             emitter
                 .emit(AgentEvent::RunAborted {
-                    messages: new_messages.clone(),
+                    messages: new_messages.to_vec(),
                 })
                 .await;
         }
@@ -166,7 +166,7 @@ fn failure_from_terminal_message(message: &AssistantMessage) -> AgentError {
     tracing::instrument(
         level = "info",
         name = "agent.run",
-        skip(context, config, emitter, cancel, stream_fn),
+        skip(context, config, emitter, cancel, stream_provider),
         fields(model = %config.model.id, prompts = prompts.len())
     )
 )]
@@ -176,15 +176,15 @@ pub async fn run_agent_loop(
     config: AgentLoopConfig,
     emitter: &EventEmitter,
     cancel: CancellationToken,
-    stream_fn: &StreamFn,
+    stream_provider: &dyn StreamProvider,
 ) -> Result<RunOutcome, AgentError> {
-    let new_messages: Vec<AgentMessage> = prompts.clone();
+    let new_messages: Arc<Vec<AgentMessage>> = Arc::new(prompts.clone());
     let mut current_context = AgentContext {
         system_prompt: context.system_prompt,
         messages: {
-            let mut msgs = context.messages;
+            let mut msgs = Arc::unwrap_or_clone(context.messages);
             msgs.extend(prompts.iter().cloned());
-            msgs
+            Arc::new(msgs)
         },
         tools: context.tools,
     };
@@ -212,7 +212,7 @@ pub async fn run_agent_loop(
         &config,
         &cancel,
         emitter,
-        stream_fn,
+        stream_provider,
     )
     .await
     {
@@ -275,7 +275,7 @@ pub async fn run_agent_loop(
     tracing::instrument(
         level = "info",
         name = "agent.run.continue",
-        skip(context, config, emitter, cancel, stream_fn),
+        skip(context, config, emitter, cancel, stream_provider),
         fields(model = %config.model.id, ctx_messages = context.messages.len())
     )
 )]
@@ -284,7 +284,7 @@ pub async fn run_agent_loop_continue(
     config: AgentLoopConfig,
     emitter: &EventEmitter,
     cancel: CancellationToken,
-    stream_fn: &StreamFn,
+    stream_provider: &dyn StreamProvider,
 ) -> Result<RunOutcome, AgentError> {
     if context.messages.is_empty() {
         return Err(AgentError::NoMessages);
@@ -299,7 +299,7 @@ pub async fn run_agent_loop_continue(
         messages: context.messages,
         tools: context.tools,
     };
-    let mut new_messages: Vec<AgentMessage> = Vec::new();
+    let mut new_messages: Arc<Vec<AgentMessage>> = Arc::new(Vec::new());
 
     emitter.emit(AgentEvent::AgentStart).await;
     emitter.emit(AgentEvent::TurnStart).await;
@@ -310,7 +310,7 @@ pub async fn run_agent_loop_continue(
         &config,
         &cancel,
         emitter,
-        stream_fn,
+        stream_provider,
     )
     .await
     {
@@ -379,11 +379,11 @@ pub async fn run_agent_loop_continue(
 )]
 async fn run_loop(
     current_context: &mut AgentContext,
-    new_messages: &mut Vec<AgentMessage>,
+    new_messages: &mut Arc<Vec<AgentMessage>>,
     config: &AgentLoopConfig,
     cancel: &CancellationToken,
     emitter: &EventEmitter,
-    stream_fn: &StreamFn,
+    stream_provider: &dyn StreamProvider,
 ) -> Result<LoopExit, AgentError> {
     let mut first_turn = true;
 
@@ -423,16 +423,16 @@ async fn run_loop(
                             message: message.clone(),
                         })
                         .await;
-                    current_context.messages.push(message.clone());
-                    new_messages.push(message);
+                    Arc::make_mut(&mut current_context.messages).push(message.clone());
+                    Arc::make_mut(new_messages).push(message);
                 }
             }
 
             // Stream assistant response
             let message =
-                stream_assistant_response(current_context, config, cancel, emitter, stream_fn)
+                stream_assistant_response(current_context, config, cancel, emitter, stream_provider)
                     .await?;
-            new_messages.push(AgentMessage::Assistant(message.clone()));
+            Arc::make_mut(new_messages).push(AgentMessage::Assistant(message.clone()));
 
             if message.stop_reason == StopReason::Error
                 || message.stop_reason == StopReason::Aborted
@@ -475,10 +475,9 @@ async fn run_loop(
                 .await?;
 
                 for result in &tool_results {
-                    current_context
-                        .messages
+                    Arc::make_mut(&mut current_context.messages)
                         .push(AgentMessage::ToolResult(result.clone()));
-                    new_messages.push(AgentMessage::ToolResult(result.clone()));
+                    Arc::make_mut(new_messages).push(AgentMessage::ToolResult(result.clone()));
                 }
 
                 if cancel.is_cancelled() {
@@ -543,17 +542,17 @@ async fn stream_assistant_response(
     config: &AgentLoopConfig,
     cancel: &CancellationToken,
     emitter: &EventEmitter,
-    stream_fn: &StreamFn,
+    stream_provider: &dyn StreamProvider,
 ) -> Result<AssistantMessage, AgentError> {
     // Apply context transform if configured (AgentMessage[] → AgentMessage[])
     let messages = if let Some(ref transform) = config.transform_context {
-        transform(context.messages.clone(), cancel.clone()).await
+        Arc::new(transform(Arc::unwrap_or_clone(context.messages.clone()), cancel.clone()).await)
     } else {
         context.messages.clone()
     };
 
     // Convert to LLM-compatible messages (AgentMessage[] → Message[])
-    let llm_messages = (config.convert_to_llm)(messages).await;
+    let llm_messages = (config.convert_to_llm)(messages.to_vec()).await;
 
     // Build tool definitions
     let tool_definitions: Vec<ToolDefinition> = context
@@ -593,8 +592,11 @@ async fn stream_assistant_response(
         cancel: cancel.clone(),
     };
 
-    // Call stream function
-    let mut stream = match stream_fn(config.model.clone(), llm_context, stream_request).await {
+    // Call stream provider
+    let mut stream = match stream_provider
+        .stream(config.model.clone(), llm_context, stream_request)
+        .await
+    {
         Ok(stream) => stream,
         Err(AgentError::Aborted) => {
             let abort_msg = create_abort_message(&config.model, None);
@@ -641,8 +643,7 @@ async fn stream_assistant_response(
                 }
 
                 partial_message = Some(partial.clone());
-                context
-                    .messages
+                Arc::make_mut(&mut context.messages)
                     .push(AgentMessage::Assistant(partial.clone()));
                 added_partial = true;
                 emitter
@@ -1058,7 +1059,7 @@ async fn prepare_tool_call(
             args: args_cell.clone(),
             context: AgentContextSnapshot {
                 system_prompt: context.system_prompt.clone(),
-                messages: context.messages.clone(),
+                messages: Arc::clone(&context.messages),
                 tools: context.tools.clone(),
             },
         };
@@ -1188,7 +1189,7 @@ async fn finalize_executed_tool_call(
             is_error: executed.is_error,
             context: AgentContextSnapshot {
                 system_prompt: context.system_prompt.clone(),
-                messages: context.messages.clone(),
+                messages: Arc::clone(&context.messages),
                 tools: context.tools.clone(),
             },
         };
@@ -1273,7 +1274,8 @@ fn stream_event_partial_for_update(ev: &StreamEvent) -> Option<&AssistantMessage
 }
 
 fn update_context_message(context: &mut AgentContext, message: &AssistantMessage) {
-    if let Some(last) = context.messages.last_mut() {
+    let msgs = Arc::make_mut(&mut context.messages);
+    if let Some(last) = msgs.last_mut() {
         *last = AgentMessage::Assistant(message.clone());
     }
 }
@@ -1284,14 +1286,13 @@ async fn finalize_stream_message(
     added_partial: bool,
     emitter: &EventEmitter,
 ) {
+    let msgs = Arc::make_mut(&mut context.messages);
     if added_partial {
-        if let Some(last) = context.messages.last_mut() {
+        if let Some(last) = msgs.last_mut() {
             *last = AgentMessage::Assistant(message.clone());
         }
     } else {
-        context
-            .messages
-            .push(AgentMessage::Assistant(message.clone()));
+        msgs.push(AgentMessage::Assistant(message.clone()));
         emitter
             .emit(AgentEvent::MessageStart {
                 message: AgentMessage::Assistant(message.clone()),

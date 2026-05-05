@@ -12,18 +12,18 @@ use common::{
 use oh_my_agentloop::{
     Agent, AgentError, AgentEvent, AgentMessage, AgentOptions, AgentTool, AgentToolResult,
     AssistantMessage, ContentBlock, InitialAgentState, LlmContext, Message, Model, StopReason,
-    TextContent, ThinkingContent, ThinkingLevel, ToolCallContent, ToolResultMessage, UserContent,
-    UserMessage,
+    StreamFnAdapter, StreamProvider, TextContent, ThinkingContent, ThinkingLevel, ToolCallContent,
+    ToolResultMessage, UserContent, UserMessage,
 };
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
-fn agent_options(stream_fn: oh_my_agentloop::StreamFn) -> AgentOptions {
+fn agent_options(stream_provider: Arc<dyn StreamProvider>) -> AgentOptions {
     AgentOptions {
         initial_state: None,
         convert_to_llm: None,
         transform_context: None,
-        stream_fn,
+        stream_provider,
         get_api_key: None,
         before_tool_call: None,
         after_tool_call: None,
@@ -212,7 +212,7 @@ async fn multi_turn_context_is_preserved_across_prompts() {
         })
     });
 
-    let mut opts = agent_options(stream_fn);
+    let mut opts = agent_options(Arc::new(StreamFnAdapter(stream_fn)));
     opts.initial_state = Some(InitialAgentState {
         system_prompt: Some("You are a helpful assistant.".into()),
         model: Some(model),

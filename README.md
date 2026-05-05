@@ -12,7 +12,7 @@ This project is a Rust port of [pi-agent-core](https://github.com/badlogic/pi-mo
 
 **Core capabilities:**
 
-- **Provider-agnostic LLM streaming** via an injected `StreamFn` — works with any provider.
+- **Provider-agnostic LLM streaming** via an injected `StreamProvider` — works with any provider. Legacy `StreamFn` closures are supported via an adapter.
 - **Tool call orchestration** with JSON Schema validation, before/after hooks, and parallel or sequential execution.
 - **Dual-layer API** — use the low-level `run_agent_loop` for full control, or the high-level `Agent` for managed state, subscriptions, and queue-based intervention.
 - **Runtime intervention** — inject `steer` messages mid-run or queue `follow_up` tasks for after the agent would otherwise stop.
@@ -34,7 +34,7 @@ oh-my-agentloop = { path = "../oh-my-agentloop" }
 ```rust
 use std::sync::Arc;
 use oh_my_agentloop::{
-    Agent, AgentOptions, AssistantMessage, ContentBlock, InitialAgentState,
+    Agent, AgentOptionsBuilder, AssistantMessage, ContentBlock, InitialAgentState,
     Model, ModelCost, StopReason, StreamEvent, StreamFn, TextContent,
     ThinkingLevel, Usage,
 };
@@ -86,7 +86,7 @@ fn my_stream_fn() -> StreamFn {
 ```rust
 #[tokio::main]
 async fn main() {
-    let options = AgentOptions::builder(my_stream_fn())
+    let options = AgentOptionsBuilder::from_stream_fn(my_stream_fn())
         .initial_state(InitialAgentState {
             system_prompt: Some("You are a helpful assistant.".into()),
             model: Some(my_model()),
@@ -190,7 +190,7 @@ impl AgentTool for EchoTool {
                         │
 ┌───────────────────────▼──────────────────────────────────┐
 │ Integration Boundary (you provide these)                 │
-│ - StreamFn: connect to any LLM provider                  │
+│ - StreamProvider: connect to any LLM provider            │
 │ - AgentTool: implement external capabilities             │
 │ - convert_to_llm / transform_context / hooks             │
 └──────────────────────────────────────────────────────────┘
@@ -205,7 +205,7 @@ For full architectural details, see [docs/AGENT_ARCHITECTURE.md](docs/AGENT_ARCH
 | Concept | Description |
 |---------|-------------|
 | `Message` vs `AgentMessage` | `Message` is what the LLM understands (user/assistant/tool-result). `AgentMessage` adds a `Custom` variant for application-level messages, filtered out by `convert_to_llm` before LLM calls. |
-| `StreamFn` | Your LLM provider adapter. Takes a `Model`, `LlmContext`, and `StreamRequest`; returns a stream of `StreamEvent`s. |
+| `StreamProvider` | Your LLM provider adapter. Implement this trait (or pass a `StreamFn` closure via the adapter) to connect any provider. |
 | `AgentTool` | A trait for tools the agent can call. Includes JSON Schema `parameters()`, optional `prepare_arguments()`, and `execute()`. |
 | `AgentEvent` | Events emitted during a run — `AgentStart`, `TurnStart/End`, `MessageStart/Update/End`, `ToolExecution*`, `RunCompleted/Failed/Aborted`. |
 | `steer()` / `follow_up()` | Queue-based runtime intervention. Steering injects messages before the next LLM call; follow-up runs only after the agent would otherwise stop. |

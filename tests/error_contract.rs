@@ -9,8 +9,8 @@ use futures::stream::{self, StreamExt};
 use oh_my_agentloop::{
     agent_loop, AgentContext, AgentError, AgentEvent, AgentLoopConfig, AgentMessage,
     AssistantMessage, ContentBlock, Message, Model, ModelCost, RunOutcome, StopReason, StreamEvent,
-    StreamFn, StreamOptions, StreamRequest, TextContent, Transport, Usage, UserContent,
-    UserMessage,
+    StreamFn, StreamFnAdapter, StreamOptions, StreamProvider, StreamRequest, TextContent,
+    Transport, Usage, UserContent, UserMessage,
 };
 use oh_my_agentloop::{Agent, AgentOptions, InitialAgentState, ThinkingLevel};
 use tokio_util::sync::CancellationToken;
@@ -102,17 +102,17 @@ fn run_contract_types_are_public_and_instantiable() {
     };
 
     let completed = RunOutcome::Completed {
-        new_messages: vec![],
+        new_messages: Arc::new(vec![]),
     };
     let failed = RunOutcome::Failed {
-        new_messages: vec![user_message("boom")],
+        new_messages: Arc::new(vec![user_message("boom")]),
         error: AgentError::Aborted,
     };
     let aborted = RunOutcome::Aborted {
-        new_messages: vec![AgentMessage::Assistant(assistant_text(
+        new_messages: Arc::new(vec![AgentMessage::Assistant(assistant_text(
             "bye",
             &test_model(),
-        ))],
+        ))]),
     };
 
     assert_eq!(request.options.transport, Transport::Sse);
@@ -123,7 +123,7 @@ fn run_contract_types_are_public_and_instantiable() {
 
     let ctx = AgentContext {
         system_prompt: "sys".into(),
-        messages: vec![user_message("hello")],
+        messages: Arc::new(vec![user_message("hello")]),
         tools: vec![],
     };
     assert_eq!(ctx.messages.len(), 1);
@@ -152,7 +152,7 @@ async fn stream_request_cancel_is_same_channel_as_loop_cancellation_token() {
 
     let ctx = AgentContext {
         system_prompt: "sys".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![],
     };
     let config = base_loop_config(model);
@@ -162,7 +162,7 @@ async fn stream_request_cancel_is_same_channel_as_loop_cancellation_token() {
         ctx,
         config,
         loop_cancel.clone(),
-        stream_fn,
+        Arc::new(StreamFnAdapter(stream_fn)),
     );
 
     let drain = tokio::spawn(collect_loop_events(events_rx));
@@ -192,7 +192,7 @@ async fn low_level_stream_errors_emit_run_failed_before_receiver_closes() {
     let config = base_loop_config(model.clone());
     let ctx = AgentContext {
         system_prompt: String::new(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![],
     };
     let stream_fn: StreamFn = Arc::new(|_model, _ctx, _request| {
@@ -204,7 +204,7 @@ async fn low_level_stream_errors_emit_run_failed_before_receiver_closes() {
         ctx,
         config,
         CancellationToken::new(),
-        stream_fn,
+        Arc::new(StreamFnAdapter(stream_fn)),
     ))
     .await;
 
@@ -225,7 +225,7 @@ async fn low_level_cancelled_runs_emit_run_aborted_before_receiver_closes() {
     let config = base_loop_config(model.clone());
     let ctx = AgentContext {
         system_prompt: String::new(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![],
     };
     let cancel = CancellationToken::new();
@@ -262,7 +262,7 @@ async fn low_level_cancelled_runs_emit_run_aborted_before_receiver_closes() {
         ctx,
         config,
         cancel,
-        stream_fn,
+        Arc::new(StreamFnAdapter(stream_fn)),
     ))
     .await;
 
@@ -279,7 +279,7 @@ async fn provider_stream_error_events_emit_run_failed() {
     let config = base_loop_config(model.clone());
     let ctx = AgentContext {
         system_prompt: String::new(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![],
     };
 
@@ -304,7 +304,7 @@ async fn provider_stream_error_events_emit_run_failed() {
         ctx,
         config,
         CancellationToken::new(),
-        stream_fn,
+        Arc::new(StreamFnAdapter(stream_fn)),
     ))
     .await;
 
@@ -321,7 +321,7 @@ async fn cancel_before_first_partial_emits_aborted_terminal_and_message() {
     let config = base_loop_config(model.clone());
     let ctx = AgentContext {
         system_prompt: String::new(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![],
     };
     let cancel = CancellationToken::new();
@@ -351,7 +351,7 @@ async fn cancel_before_first_partial_emits_aborted_terminal_and_message() {
         ctx,
         config,
         cancel,
-        stream_fn,
+        Arc::new(StreamFnAdapter(stream_fn)),
     ))
     .await;
 
@@ -381,7 +381,7 @@ async fn streams_without_terminal_events_emit_run_failed() {
     let config = base_loop_config(model.clone());
     let ctx = AgentContext {
         system_prompt: String::new(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![],
     };
     let stream_fn: StreamFn = Arc::new(move |_model, _ctx, _request| {
@@ -396,7 +396,7 @@ async fn streams_without_terminal_events_emit_run_failed() {
         ctx,
         config,
         CancellationToken::new(),
-        stream_fn,
+        Arc::new(StreamFnAdapter(stream_fn)),
     ))
     .await;
 
@@ -413,7 +413,7 @@ async fn partial_stream_without_terminal_events_emits_run_failed() {
     let config = base_loop_config(model.clone());
     let ctx = AgentContext {
         system_prompt: String::new(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![],
     };
     let start = assistant_text("", &model);
@@ -439,7 +439,7 @@ async fn partial_stream_without_terminal_events_emits_run_failed() {
         ctx,
         config,
         CancellationToken::new(),
-        stream_fn,
+        Arc::new(StreamFnAdapter(stream_fn)),
     ))
     .await;
 
@@ -466,7 +466,7 @@ async fn partial_stream_without_terminal_events_emits_run_failed() {
     ));
 }
 
-fn agent_options(stream_fn: StreamFn, model: Model) -> AgentOptions {
+fn agent_options(stream_provider: Arc<dyn StreamProvider>, model: Model) -> AgentOptions {
     AgentOptions {
         initial_state: Some(InitialAgentState {
             system_prompt: Some("You are helpful.".into()),
@@ -477,7 +477,7 @@ fn agent_options(stream_fn: StreamFn, model: Model) -> AgentOptions {
         }),
         convert_to_llm: None,
         transform_context: None,
-        stream_fn,
+        stream_provider,
         get_api_key: None,
         before_tool_call: None,
         after_tool_call: None,
@@ -501,7 +501,7 @@ async fn agent_prompt_returns_runtime_error_and_keeps_failure_message() {
     let stream_fn: StreamFn = Arc::new(|_model, _ctx, _request| {
         Box::pin(async move { Err(AgentError::Stream("boom".into())) })
     });
-    let agent = Agent::new(agent_options(stream_fn, model.clone()));
+    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(stream_fn)), model.clone()));
 
     let err = agent.prompt_text("hello", None).await.unwrap_err();
     assert!(matches!(err, AgentError::Stream(message) if message == "boom"));
@@ -534,7 +534,7 @@ async fn agent_prompt_returns_provider_error_terminal_as_runtime_error() {
         })
     });
 
-    let agent = Agent::new(agent_options(stream_fn, model.clone()));
+    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(stream_fn)), model.clone()));
 
     let err = agent.prompt_text("hello", None).await.unwrap_err();
     assert!(matches!(err, AgentError::Stream(message) if message == "provider boom"));
@@ -568,7 +568,7 @@ async fn agent_prompt_normalizes_missing_provider_error_message() {
         })
     });
 
-    let agent = Agent::new(agent_options(stream_fn, model.clone()));
+    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(stream_fn)), model.clone()));
     let events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
     let events_sub = events.clone();
     let _sub = agent.subscribe(move |event, _cancel| {
@@ -614,7 +614,7 @@ async fn completed_terminal_event_wins_over_late_cancel() {
         })
     });
 
-    let agent = Agent::new(agent_options(stream_fn, model.clone()));
+    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(stream_fn)), model.clone()));
     let events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
     let events_sub = events.clone();
     let _sub = agent.subscribe(move |event, _cancel| {
@@ -659,7 +659,7 @@ async fn agent_prompt_returns_aborted_for_provider_supplied_aborted_terminal() {
         })
     });
 
-    let agent = Agent::new(agent_options(stream_fn, model.clone()));
+    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(stream_fn)), model.clone()));
     let events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
     let events_sub = events.clone();
     let _sub = agent.subscribe(move |event, _cancel| {
@@ -691,7 +691,7 @@ async fn agent_prompt_returns_aborted_for_provider_construction_abort() {
     let stream_fn: StreamFn =
         Arc::new(|_model, _ctx, _request| Box::pin(async move { Err(AgentError::Aborted) }));
 
-    let agent = Agent::new(agent_options(stream_fn, model.clone()));
+    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(stream_fn)), model.clone()));
     let events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
     let events_sub = events.clone();
     let _sub = agent.subscribe(move |event, _cancel| {
@@ -737,7 +737,7 @@ async fn early_abort_does_not_reuse_historical_aborted_message() {
     old_aborted.stop_reason = StopReason::Aborted;
     old_aborted.error_message = Some("old abort".into());
 
-    let mut options = agent_options(stream_fn, model.clone());
+    let mut options = agent_options(Arc::new(StreamFnAdapter(stream_fn)), model.clone());
     options.initial_state = Some(InitialAgentState {
         system_prompt: Some("You are helpful.".into()),
         model: Some(model),
@@ -780,7 +780,7 @@ async fn agent_continue_returns_runtime_error_from_low_level_failure() {
     let stream_fn: StreamFn = Arc::new(|_model, _ctx, _request| {
         Box::pin(async move { Err(AgentError::Stream("continue boom".into())) })
     });
-    let mut options = agent_options(stream_fn, model.clone());
+    let mut options = agent_options(Arc::new(StreamFnAdapter(stream_fn)), model.clone());
     options.initial_state = Some(InitialAgentState {
         system_prompt: Some("You are helpful.".into()),
         model: Some(model),

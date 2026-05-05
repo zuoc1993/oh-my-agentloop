@@ -8,7 +8,7 @@
 
 `oh-my-agentloop` 是一个可嵌入的 Rust Agent Loop Runtime，用来把以下能力组合成统一运行时：
 
-- LLM 流式调用抽象：通过注入 `StreamFn` 适配任意 Provider。
+- LLM 流式调用抽象：通过注入 `StreamProvider` 适配任意 Provider（`StreamFn` 闭包通过 `StreamFnAdapter` 兼容）。
 - 消息模型分层：应用层使用 `AgentMessage`，LLM 边界使用 `Message`。
 - 工具调用编排：支持参数预处理、JSON Schema 校验、前后置 Hook、流式更新。
 - 事件驱动状态同步：低层循环发事件，高层 `Agent` 消费事件并维护状态。
@@ -38,7 +38,7 @@
                         │ 注入
 ┌───────────────────────▼──────────────────────────────────┐
 │ Integration Boundary                                     │
-│ - StreamFn: 连接具体 LLM Provider                        │
+│ - StreamProvider: 连接具体 LLM Provider                  │
 │ - AgentTool: 执行外部能力                                │
 │ - convert_to_llm / transform_context / hooks             │
 └──────────────────────────────────────────────────────────┘
@@ -102,7 +102,7 @@ AgentContext.messages
   -> transform_context (可选)
   -> convert_to_llm (必需)
   -> LlmContext.messages
-  -> StreamFn
+  -> StreamProvider
 ```
 
 ### 4.2 内容块模型
@@ -221,7 +221,7 @@ while true:
 3. 基于工具定义构造 `LlmContext`
 4. 解析动态或静态 API Key
 5. 组装 `StreamOptions`
-6. 调用注入的 `StreamFn`
+6. 调用注入的 `StreamProvider`
 
 ### 6.2 流式事件语义
 
@@ -560,7 +560,7 @@ RunCompleted
 
 代价：
 
-- `StreamFn` 的契约更严格，调用方必须提供合法 partial
+- `StreamProvider` 的契约更严格，调用方必须提供合法 partial
 
 ### 12.3 并发执行、顺序收束工具结果
 
@@ -620,7 +620,7 @@ RunCompleted
 
 ### 13.4 Provider 适配
 
-调用方只要实现 `StreamFn`，即可接入不同模型服务。
+调用方只要实现 `StreamProvider`（或传递 `StreamFn` 闭包），即可接入不同模型服务。
 
 运行时并不绑定任何具体厂商 SDK，这是项目最关键的可移植性来源。
 
@@ -656,7 +656,7 @@ RunCompleted
   -> run_agent_loop
   -> run_loop
   -> stream_assistant_response
-  -> StreamFn(model, llm_context, stream_options)
+  -> StreamProvider::stream(model, llm_context, stream_request)
   -> StreamEvent::Start / ... / Done
   -> EventEmitter.emit(AgentEvent)
   -> Agent::process_event
@@ -736,7 +736,7 @@ Agent 正在运行
 推荐的初始化思路：
 
 1. 先定义 `Model`
-2. 先让 `StreamFn` 支持最简单的 `Done` 终结事件
+2. 先让 `StreamProvider` 支持最简单的 `Done` 终结事件
 3. 再补工具和 streaming 增量事件
 4. 最后再加 `transform_context`、hooks 和 payload 改写
 
@@ -745,9 +745,11 @@ Agent 正在运行
 ```rust
 use std::sync::Arc;
 
+use std::sync::Arc;
+
 use oh_my_agentloop::{
-    Agent, AgentOptions, AssistantMessage, ContentBlock, InitialAgentState, Model, ModelCost,
-    StopReason, StreamEvent, StreamFn, TextContent, ThinkingLevel, Usage,
+    Agent, AgentOptionsBuilder, AssistantMessage, ContentBlock, InitialAgentState, Model, ModelCost,
+    StopReason, StreamEvent, StreamFn, StreamFnAdapter, TextContent, ThinkingLevel, Usage,
 };
 
 fn model() -> Model {
@@ -793,32 +795,17 @@ fn stream_fn() -> StreamFn {
 }
 
 async fn build_agent() -> Agent {
-    Agent::new(AgentOptions {
-        initial_state: Some(InitialAgentState {
-            system_prompt: Some("You are helpful.".into()),
-            model: Some(model()),
-            thinking_level: Some(ThinkingLevel::Off),
-            tools: Some(vec![]),
-            messages: None,
-        }),
-        convert_to_llm: None,
-        transform_context: None,
-        stream_fn: stream_fn(),
-        get_api_key: None,
-        before_tool_call: None,
-        after_tool_call: None,
-        steering_mode: None,
-        follow_up_mode: None,
-        session_id: None,
-        transport: None,
-        tool_execution: None,
-        api_key: None,
-        temperature: None,
-        max_tokens: None,
-        thinking_budgets: None,
-        max_retry_delay_ms: None,
-        on_payload: None,
-    })
+    Agent::new(
+        AgentOptionsBuilder::from_stream_fn(stream_fn())
+            .initial_state(InitialAgentState {
+                system_prompt: Some("You are helpful.".into()),
+                model: Some(model()),
+                thinking_level: Some(ThinkingLevel::Off),
+                tools: Some(vec![]),
+                messages: None,
+            })
+            .build(),
+    )
 }
 ```
 
@@ -965,7 +952,7 @@ async fn execute(
 
 `oh-my-agentloop` 的整体接入方式可以概括为：
 
-- 用 `StreamFn` 接模型
+- 用 `StreamProvider` 接模型
 - 用 `AgentTool` 接能力
 - 用 `Agent` 做运行时管理
 - 用 `AgentEvent` 做观测和副作用
@@ -988,7 +975,7 @@ async fn execute(
 
 如果后续要继续演进，最自然的方向有两个：
 
-- 新增 provider / proxy 侧能力，但保持 `StreamFn` 边界稳定
+- 新增 provider / proxy 侧能力，但保持 `StreamProvider` 边界稳定
 - 在不破坏事件顺序与队列语义的前提下扩展更高层的 session、persistence 或 orchestration 能力
 
 ---

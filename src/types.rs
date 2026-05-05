@@ -476,6 +476,54 @@ pub type StreamFn = Arc<
         + Sync,
 >;
 
+/// Provider-agnostic LLM streaming interface.
+///
+/// This is the idiomatic Rust alternative to the raw [`StreamFn`] closure type.
+/// Implementors can hold state (e.g. an HTTP client) and expose helper methods.
+///
+/// A blanket implementation is provided for [`StreamFn`] so existing closure-based
+/// providers continue to work without modification.
+#[async_trait]
+pub trait StreamProvider: Send + Sync {
+    /// Initiate an LLM stream for the given model and context.
+    async fn stream(
+        &self,
+        model: Model,
+        ctx: LlmContext,
+        req: StreamRequest,
+    ) -> Result<LlmEventStream, AgentError>;
+}
+
+#[async_trait]
+impl StreamProvider for StreamFn {
+    async fn stream(
+        &self,
+        model: Model,
+        ctx: LlmContext,
+        req: StreamRequest,
+    ) -> Result<LlmEventStream, AgentError> {
+        self(model, ctx, req).await
+    }
+}
+
+/// Wrapper that adapts a legacy [`StreamFn`] closure to the [`StreamProvider`] trait.
+///
+/// This is used internally to bridge the old closure-based API to the new trait-based API.
+/// Users typically do not need to construct this directly; use `AgentOptionsBuilder::from_stream_fn`.
+pub struct StreamFnAdapter(pub StreamFn);
+
+#[async_trait]
+impl StreamProvider for StreamFnAdapter {
+    async fn stream(
+        &self,
+        model: Model,
+        ctx: LlmContext,
+        req: StreamRequest,
+    ) -> Result<LlmEventStream, AgentError> {
+        self.0(model, ctx, req).await
+    }
+}
+
 // ============================================================
 // Agent Message — extends LLM Message with custom types
 // ============================================================
@@ -598,7 +646,7 @@ pub trait AgentTool: Send + Sync {
 /// Context snapshot passed into the low-level agent loop.
 pub struct AgentContext {
     pub system_prompt: String,
-    pub messages: Vec<AgentMessage>,
+    pub messages: Arc<Vec<AgentMessage>>,
     pub tools: Vec<Arc<dyn AgentTool>>,
 }
 
@@ -627,7 +675,7 @@ pub enum ToolExecutionMode {
 /// Snapshot of the agent context passed to tool hooks.
 pub struct AgentContextSnapshot {
     pub system_prompt: String,
-    pub messages: Vec<AgentMessage>,
+    pub messages: Arc<Vec<AgentMessage>>,
     pub tools: Vec<Arc<dyn AgentTool>>,
 }
 
@@ -859,14 +907,14 @@ pub enum AgentError {
 #[must_use = "observe the RunOutcome to know whether the run succeeded, failed, or was aborted"]
 pub enum RunOutcome {
     Completed {
-        new_messages: Vec<AgentMessage>,
+        new_messages: Arc<Vec<AgentMessage>>,
     },
     Failed {
-        new_messages: Vec<AgentMessage>,
+        new_messages: Arc<Vec<AgentMessage>>,
         error: AgentError,
     },
     Aborted {
-        new_messages: Vec<AgentMessage>,
+        new_messages: Arc<Vec<AgentMessage>>,
     },
 }
 
@@ -923,7 +971,7 @@ pub struct AgentState {
     pub model: Model,
     pub thinking_level: ThinkingLevel,
     pub tools: Vec<Arc<dyn AgentTool>>,
-    pub messages: Vec<AgentMessage>,
+    pub messages: Arc<Vec<AgentMessage>>,
     /// True while a prompt/continuation is running and until event listeners have completed.
     pub is_streaming: bool,
     pub streaming_message: Option<AgentMessage>,

@@ -9,8 +9,8 @@ use std::time::Duration;
 use futures::stream::{self, StreamExt};
 use oh_my_agentloop::{
     AgentLoopConfig, AgentMessage, AssistantMessage, ContentBlock, ConvertToLlmFn, Message, Model,
-    ModelCost, OnPayloadFn, StopReason, StreamEvent, StreamFn, TextContent, Transport, Usage,
-    UserContent, UserMessage,
+    ModelCost, OnPayloadFn, StopReason, StreamEvent, StreamFn, StreamFnAdapter, StreamProvider,
+    TextContent, Transport, Usage, UserContent, UserMessage,
 };
 use serde::Serialize;
 
@@ -113,22 +113,23 @@ pub fn base_loop_config(model: Model, convert_to_llm: ConvertToLlmFn) -> AgentLo
 }
 
 /// Stream that pushes only a terminal `done` (no incremental `start`), like the TS mock tests.
-pub fn stream_done_only(final_msg: AssistantMessage) -> StreamFn {
-    Arc::new(move |_model, _ctx, _req| {
+pub fn stream_done_only(final_msg: AssistantMessage) -> Arc<dyn StreamProvider> {
+    let f: StreamFn = Arc::new(move |_model, _ctx, _req| {
         let msg = final_msg.clone();
         Box::pin(async move {
             let s = futures::stream::iter(vec![Ok(StreamEvent::Done { message: msg })]);
             Ok(Box::pin(s) as oh_my_agentloop::LlmEventStream)
         })
-    })
+    });
+    Arc::new(StreamFnAdapter(f))
 }
 
 /// Stream with TS-style `start` + partial-bearing `text_delta` + `done`.
 pub fn stream_with_partial_deltas(
     final_msg: AssistantMessage,
     delta_partial: AssistantMessage,
-) -> StreamFn {
-    Arc::new(move |_model, _ctx, _req| {
+) -> Arc<dyn StreamProvider> {
+    let f: StreamFn = Arc::new(move |_model, _ctx, _req| {
         let empty = AssistantMessage {
             content: vec![ContentBlock::Text(TextContent {
                 text: String::new(),
@@ -161,7 +162,8 @@ pub fn stream_with_partial_deltas(
             let s = futures::stream::iter(events);
             Ok(Box::pin(s) as oh_my_agentloop::LlmEventStream)
         })
-    })
+    });
+    Arc::new(StreamFnAdapter(f))
 }
 
 pub async fn collect_loop_events(
@@ -179,9 +181,9 @@ pub fn noop_on_payload() -> OnPayloadFn {
 }
 
 /// Two LLM rounds: first `Done` uses `first`, second uses `second` (tool-use + follow-up parity).
-pub fn stream_two_rounds(first: AssistantMessage, second: AssistantMessage) -> StreamFn {
+pub fn stream_two_rounds(first: AssistantMessage, second: AssistantMessage) -> Arc<dyn StreamProvider> {
     let call_index = Arc::new(AtomicUsize::new(0));
-    Arc::new(move |_model, _ctx, _req| {
+    let f: StreamFn = Arc::new(move |_model, _ctx, _req| {
         let first = first.clone();
         let second = second.clone();
         let call_index = call_index.clone();
@@ -195,17 +197,18 @@ pub fn stream_two_rounds(first: AssistantMessage, second: AssistantMessage) -> S
             let s = futures::stream::iter(vec![Ok(StreamEvent::Done { message: msg })]);
             Ok(Box::pin(s) as oh_my_agentloop::LlmEventStream)
         })
-    })
+    });
+    Arc::new(StreamFnAdapter(f))
 }
 
 /// Yields `Start` then slow `TextDelta` events so `abort()` can fire mid-stream (pi-mono e2e parity).
-pub fn slow_stream_for_abort(model: Model) -> StreamFn {
+pub fn slow_stream_for_abort(model: Model) -> Arc<dyn StreamProvider> {
     const WORDS: &[&str] = &[
         "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
         "twelve", "thirteen", "fourteen", "fifteen",
     ];
     let idx = Arc::new(AtomicUsize::new(0));
-    Arc::new(move |_m, _ctx, _req| {
+    let f: StreamFn = Arc::new(move |_m, _ctx, _req| {
         let model = model.clone();
         let idx = idx.clone();
         Box::pin(async move {
@@ -253,11 +256,12 @@ pub fn slow_stream_for_abort(model: Model) -> StreamFn {
             });
             Ok(Box::pin(s) as oh_my_agentloop::LlmEventStream)
         })
-    })
+    });
+    Arc::new(StreamFnAdapter(f))
 }
 
-pub fn stream_waits_for_cancel(model: Model) -> StreamFn {
-    Arc::new(move |_model, _ctx, request| {
+pub fn stream_waits_for_cancel(model: Model) -> Arc<dyn StreamProvider> {
+    let f: StreamFn = Arc::new(move |_model, _ctx, request| {
         let model = model.clone();
         Box::pin(async move {
             let cancel = request.cancel.clone();
@@ -282,5 +286,6 @@ pub fn stream_waits_for_cancel(model: Model) -> StreamFn {
             });
             Ok(Box::pin(s) as oh_my_agentloop::LlmEventStream)
         })
-    })
+    });
+    Arc::new(StreamFnAdapter(f))
 }

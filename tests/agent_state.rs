@@ -10,16 +10,16 @@ use common::{assistant_text, stream_done_only, stream_waits_for_cancel, test_mod
 use futures::stream::{self, StreamExt};
 use oh_my_agentloop::{
     Agent, AgentError, AgentEvent, AgentMessage, AgentOptions, InitialAgentState, Model, QueueMode,
-    StreamEvent, StreamFn, UserContent, UserMessage,
+    StreamEvent, StreamFn, StreamFnAdapter, StreamProvider, UserContent, UserMessage,
 };
 use tokio::sync::Notify;
 
-fn agent_options(stream_fn: StreamFn) -> AgentOptions {
+fn agent_options(stream_provider: Arc<dyn StreamProvider>) -> AgentOptions {
     AgentOptions {
         initial_state: None,
         convert_to_llm: None,
         transform_context: None,
-        stream_fn,
+        stream_provider,
         get_api_key: None,
         before_tool_call: None,
         after_tool_call: None,
@@ -155,7 +155,7 @@ async fn wait_for_idle_waits_for_async_subscribers_on_message_end() {
 #[tokio::test]
 async fn second_prompt_while_streaming_returns_already_processing() {
     let model = test_model();
-    let agent = Agent::new(agent_options(hanging_partial_stream(model.clone())));
+    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(hanging_partial_stream(model.clone())))));
 
     let first = tokio::spawn({
         let a = agent.clone();
@@ -175,7 +175,7 @@ async fn second_prompt_while_streaming_returns_already_processing() {
 #[tokio::test]
 async fn continue_while_streaming_returns_already_processing() {
     let model = test_model();
-    let agent = Agent::new(agent_options(hanging_partial_stream(model.clone())));
+    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(hanging_partial_stream(model.clone())))));
 
     let first = tokio::spawn({
         let a = agent.clone();
@@ -207,7 +207,7 @@ async fn continue_from_assistant_drains_follow_up_after_turn() {
         })
     });
 
-    let mut opts = agent_options(stream_fn);
+    let mut opts = agent_options(Arc::new(StreamFnAdapter(stream_fn)));
     opts.initial_state = Some(InitialAgentState {
         system_prompt: None,
         model: Some(model.clone()),
@@ -257,7 +257,7 @@ async fn continue_from_assistant_one_at_a_time_steering_runs_two_llm_rounds() {
         })
     });
 
-    let mut opts = agent_options(stream_fn);
+    let mut opts = agent_options(Arc::new(StreamFnAdapter(stream_fn)));
     opts.steering_mode = Some(QueueMode::OneAtATime);
     opts.initial_state = Some(InitialAgentState {
         system_prompt: None,
@@ -306,7 +306,7 @@ async fn steering_mode_all_drains_both_before_single_extra_llm_round() {
         })
     });
 
-    let mut opts = agent_options(stream_fn);
+    let mut opts = agent_options(Arc::new(StreamFnAdapter(stream_fn)));
     opts.steering_mode = Some(QueueMode::All);
     opts.initial_state = Some(InitialAgentState {
         system_prompt: None,
@@ -378,7 +378,7 @@ async fn forwards_session_id_to_stream_options() {
         })
     });
 
-    let mut opts = agent_options(stream_fn);
+    let mut opts = agent_options(Arc::new(StreamFnAdapter(stream_fn)));
     opts.session_id = Some("session-abc".into());
     let agent = Agent::new(opts);
     agent.prompt_text("hello", None).await.unwrap();
@@ -417,7 +417,7 @@ async fn forwards_on_payload_to_stream_options() {
         })
     });
 
-    let mut opts = agent_options(stream_fn);
+    let mut opts = agent_options(Arc::new(StreamFnAdapter(stream_fn)));
     opts.on_payload = Some(hook);
     let agent = Agent::new(opts);
     agent.prompt_text("hello", None).await.unwrap();
@@ -427,7 +427,7 @@ async fn forwards_on_payload_to_stream_options() {
 #[tokio::test]
 async fn abort_cancels_in_flight_run_and_clears_signal() {
     let model = test_model();
-    let agent = Agent::new(agent_options(hanging_partial_stream(model.clone())));
+    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(hanging_partial_stream(model.clone())))));
 
     let run = tokio::spawn({
         let a = agent.clone();

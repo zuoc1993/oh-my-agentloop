@@ -17,8 +17,8 @@ use oh_my_agentloop::{
     agent_loop, AfterToolCallContext, AfterToolCallResult, Agent, AgentContext, AgentError,
     AgentEvent, AgentMessage, AgentOptions, AgentTool, AgentToolResult, AssistantMessage,
     BeforeToolCallContext, BeforeToolCallResult, ContentBlock, InitialAgentState, Message, Model,
-    StopReason, StreamEvent, StreamFn, TextContent, ThinkingLevel, ToolCallContent,
-    ToolExecutionMode, Usage, UserContent,
+    StopReason, StreamEvent, StreamFn, StreamFnAdapter, StreamProvider, TextContent, ThinkingLevel,
+    ToolCallContent, ToolExecutionMode, Usage, UserContent,
 };
 use serde_json::{json, Value};
 use tokio::sync::Barrier;
@@ -47,9 +47,9 @@ fn assistant_with_tool_calls(model: &Model, calls: Vec<ToolCallContent>) -> Assi
 }
 
 /// Two-round stream: first `tool_use`, then final text response.
-fn stream_two_rounds(first: AssistantMessage, second: AssistantMessage) -> StreamFn {
+fn stream_two_rounds(first: AssistantMessage, second: AssistantMessage) -> Arc<dyn StreamProvider> {
     let call_index = Arc::new(AtomicUsize::new(0));
-    Arc::new(move |_model, _ctx, _req| {
+    let f: StreamFn = Arc::new(move |_model, _ctx, _req| {
         let first = first.clone();
         let second = second.clone();
         let call_index = call_index.clone();
@@ -63,11 +63,12 @@ fn stream_two_rounds(first: AssistantMessage, second: AssistantMessage) -> Strea
             let s = futures::stream::iter(vec![Ok(StreamEvent::Done { message: msg })]);
             Ok(Box::pin(s) as oh_my_agentloop::LlmEventStream)
         })
-    })
+    });
+    Arc::new(StreamFnAdapter(f))
 }
 
 fn agent_options(
-    stream_fn: StreamFn,
+    stream_provider: Arc<dyn StreamProvider>,
     model: Model,
     tools: Vec<Arc<dyn AgentTool>>,
     tool_execution: ToolExecutionMode,
@@ -82,7 +83,7 @@ fn agent_options(
         }),
         convert_to_llm: Some(identity_convert()),
         transform_context: None,
-        stream_fn,
+        stream_provider,
         get_api_key: None,
         before_tool_call: None,
         after_tool_call: None,
@@ -199,7 +200,7 @@ async fn missing_tool_produces_error_tool_result() {
     let config = base_loop_config(model.clone(), identity_convert());
     let ctx = AgentContext {
         system_prompt: "".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![],
     };
     let cancel = CancellationToken::new();
@@ -245,7 +246,7 @@ async fn missing_tool_stays_in_band_and_run_still_completes() {
     let config = base_loop_config(model.clone(), identity_convert());
     let ctx = AgentContext {
         system_prompt: "".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![],
     };
 
@@ -317,7 +318,7 @@ async fn invalid_arguments_yield_validation_error_tool_result() {
     let config = base_loop_config(model.clone(), identity_convert());
     let ctx = AgentContext {
         system_prompt: "".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![tool],
     };
     let cancel = CancellationToken::new();
@@ -447,7 +448,7 @@ async fn prepare_arguments_runs_before_validation() {
     let config = base_loop_config(model.clone(), identity_convert());
     let ctx = AgentContext {
         system_prompt: "".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![tool],
     };
     let cancel = CancellationToken::new();
@@ -496,7 +497,7 @@ async fn before_tool_call_can_block() {
     let final_text = assistant_text("done", &model);
     let ctx = AgentContext {
         system_prompt: "".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![tool],
     };
     let cancel = CancellationToken::new();
@@ -549,7 +550,7 @@ async fn before_tool_call_mutated_args_execute_without_revalidation() {
     let final_text = assistant_text("done", &model);
     let ctx = AgentContext {
         system_prompt: "".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![tool],
     };
     let cancel = CancellationToken::new();
@@ -596,7 +597,7 @@ async fn after_tool_call_can_override_content_details_and_error_flag() {
     let final_text = assistant_text("done", &model);
     let ctx = AgentContext {
         system_prompt: "".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![tool],
     };
     let cancel = CancellationToken::new();
@@ -639,7 +640,7 @@ async fn tool_on_update_emits_tool_execution_update_events() {
     let config = base_loop_config(model.clone(), identity_convert());
     let ctx = AgentContext {
         system_prompt: "".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![tool],
     };
     let cancel = CancellationToken::new();
@@ -746,7 +747,7 @@ async fn parallel_mode_runs_concurrently_but_tool_results_in_source_order() {
     config.tool_execution = ToolExecutionMode::Parallel;
     let ctx = AgentContext {
         system_prompt: "".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![tool.clone()],
     };
     let cancel = CancellationToken::new();
@@ -844,11 +845,11 @@ async fn steering_messages_injected_only_after_all_tool_calls_finish() {
 
     let ctx = AgentContext {
         system_prompt: "".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![tool.clone()],
     };
     let cancel = CancellationToken::new();
-    let rx = agent_loop(vec![user_message("start")], ctx, config, cancel, stream_fn);
+    let rx = agent_loop(vec![user_message("start")], ctx, config, cancel, Arc::new(StreamFnAdapter(stream_fn)));
     let events = collect_loop_events(rx).await;
     let ran: Vec<String> = executed
         .lock()
@@ -912,7 +913,7 @@ async fn sequential_abort_stops_starting_later_tools() {
     config.tool_execution = ToolExecutionMode::Sequential;
     let ctx = AgentContext {
         system_prompt: "".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![tool],
     };
     let cancel = CancellationToken::new();
@@ -985,7 +986,7 @@ async fn parallel_abort_during_preparation_stops_later_starts_and_execution() {
     config.before_tool_call = Some(before);
     let ctx = AgentContext {
         system_prompt: "".into(),
-        messages: vec![],
+        messages: Arc::new(vec![]),
         tools: vec![tool],
     };
 

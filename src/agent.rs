@@ -87,7 +87,7 @@ struct MutableAgentState {
     model: Model,
     thinking_level: ThinkingLevel,
     tools: Vec<Arc<dyn AgentTool>>,
-    messages: Vec<AgentMessage>,
+    messages: Arc<Vec<AgentMessage>>,
     is_streaming: bool,
     streaming_message: Option<AgentMessage>,
     pending_tool_calls: HashSet<String>,
@@ -101,7 +101,7 @@ impl MutableAgentState {
             model: self.model.clone(),
             thinking_level: self.thinking_level.clone(),
             tools: self.tools.clone(),
-            messages: self.messages.clone(),
+            messages: Arc::clone(&self.messages),
             is_streaming: self.is_streaming,
             streaming_message: self.streaming_message.clone(),
             pending_tool_calls: self.pending_tool_calls.clone(),
@@ -132,7 +132,7 @@ pub struct AgentOptions {
     pub initial_state: Option<InitialAgentState>,
     pub convert_to_llm: Option<ConvertToLlmFn>,
     pub transform_context: Option<TransformContextFn>,
-    pub stream_fn: StreamFn,
+    pub stream_provider: Arc<dyn StreamProvider>,
     pub get_api_key: Option<GetApiKeyFn>,
     pub before_tool_call: Option<BeforeToolCallHookFn>,
     pub after_tool_call: Option<AfterToolCallHookFn>,
@@ -159,8 +159,8 @@ impl AgentOptions {
     ///     .tool_execution(ToolExecutionMode::Parallel)
     ///     .build();
     /// ```
-    pub fn builder(stream_fn: StreamFn) -> AgentOptionsBuilder {
-        AgentOptionsBuilder::new(stream_fn)
+    pub fn builder(stream_provider: Arc<dyn StreamProvider>) -> AgentOptionsBuilder {
+        AgentOptionsBuilder::new(stream_provider)
     }
 }
 
@@ -171,14 +171,14 @@ pub struct AgentOptionsBuilder {
 }
 
 impl AgentOptionsBuilder {
-    /// Create a new builder with only the required `stream_fn` field set.
-    pub fn new(stream_fn: StreamFn) -> Self {
+    /// Create a new builder with the required `stream_provider` field set.
+    pub fn new(stream_provider: Arc<dyn StreamProvider>) -> Self {
         Self {
             inner: AgentOptions {
                 initial_state: None,
                 convert_to_llm: None,
                 transform_context: None,
-                stream_fn,
+                stream_provider,
                 get_api_key: None,
                 before_tool_call: None,
                 after_tool_call: None,
@@ -197,6 +197,11 @@ impl AgentOptionsBuilder {
         }
     }
 
+    /// Create a new builder from a legacy [`StreamFn`] closure.
+    pub fn from_stream_fn(stream_fn: StreamFn) -> Self {
+        Self::new(Arc::new(StreamFnAdapter(stream_fn)))
+    }
+
     pub fn initial_state(mut self, state: InitialAgentState) -> Self {
         self.inner.initial_state = Some(state);
         self
@@ -207,6 +212,10 @@ impl AgentOptionsBuilder {
     }
     pub fn transform_context(mut self, f: TransformContextFn) -> Self {
         self.inner.transform_context = Some(f);
+        self
+    }
+    pub fn stream_provider(mut self, provider: Arc<dyn StreamProvider>) -> Self {
+        self.inner.stream_provider = provider;
         self
     }
     pub fn get_api_key(mut self, f: GetApiKeyFn) -> Self {
@@ -313,7 +322,7 @@ struct AgentInner {
     // Config (cloneable, set at construction)
     convert_to_llm: ConvertToLlmFn,
     transform_context: Option<TransformContextFn>,
-    stream_fn: StreamFn,
+    stream_provider: Arc<dyn StreamProvider>,
     get_api_key: Option<GetApiKeyFn>,
     before_tool_call: Mutex<Option<BeforeToolCallHookFn>>,
     after_tool_call: Mutex<Option<AfterToolCallHookFn>>,
@@ -352,7 +361,7 @@ impl Agent {
             model: initial.model.unwrap_or_default(),
             thinking_level: initial.thinking_level.unwrap_or_default(),
             tools: initial.tools.unwrap_or_default(),
-            messages: initial.messages.unwrap_or_default(),
+            messages: Arc::new(initial.messages.unwrap_or_default()),
             is_streaming: false,
             streaming_message: None,
             pending_tool_calls: HashSet::new(),
@@ -380,7 +389,7 @@ impl Agent {
                 run_complete: Mutex::new(None),
                 convert_to_llm,
                 transform_context: options.transform_context,
-                stream_fn: options.stream_fn,
+                stream_provider: options.stream_provider,
                 get_api_key: options.get_api_key,
                 before_tool_call: Mutex::new(options.before_tool_call),
                 after_tool_call: Mutex::new(options.after_tool_call),
@@ -433,7 +442,7 @@ impl Agent {
     }
 
     pub fn set_messages(&self, messages: Vec<AgentMessage>) {
-        self.with_state_mut(|s| s.messages = messages);
+        self.with_state_mut(|s| s.messages = Arc::new(messages));
     }
 
     pub fn set_before_tool_call(&self, hook: Option<BeforeToolCallHookFn>) {
@@ -540,7 +549,7 @@ impl Agent {
     /// Clear transcript state, runtime state, and queued messages.
     pub fn reset(&self) {
         let mut state = self.inner.state.lock().unwrap();
-        state.messages.clear();
+        Arc::make_mut(&mut state.messages).clear();
         state.is_streaming = false;
         state.streaming_message = None;
         state.pending_tool_calls.clear();
@@ -649,9 +658,9 @@ impl Agent {
                 Box::pin(async move {
                     let context = agent.create_context_snapshot();
                     let config = agent.create_loop_config(skip_initial_steering_poll);
-                    let stream_fn = agent.inner.stream_fn.clone();
+                    let stream_provider = Arc::clone(&agent.inner.stream_provider);
                     let emitter = agent.create_emitter();
-                    run_agent_loop(messages, context, config, &emitter, cancel, &stream_fn).await
+                    run_agent_loop(messages, context, config, &emitter, cancel, &*stream_provider).await
                 })
             })
             .await?;
@@ -665,9 +674,9 @@ impl Agent {
                 Box::pin(async move {
                     let context = agent.create_context_snapshot();
                     let config = agent.create_loop_config(false);
-                    let stream_fn = agent.inner.stream_fn.clone();
+                    let stream_provider = Arc::clone(&agent.inner.stream_provider);
                     let emitter = agent.create_emitter();
-                    run_agent_loop_continue(context, config, &emitter, cancel, &stream_fn).await
+                    run_agent_loop_continue(context, config, &emitter, cancel, &*stream_provider).await
                 })
             })
             .await?;
@@ -726,7 +735,7 @@ impl Agent {
         let state = self.inner.state.lock().unwrap();
         AgentContext {
             system_prompt: state.system_prompt.clone(),
-            messages: state.messages.clone(),
+            messages: Arc::clone(&state.messages),
             tools: state.tools.clone(),
         }
     }
@@ -812,7 +821,7 @@ impl Agent {
                 }
                 AgentEvent::MessageEnd { message } => {
                     state.streaming_message = None;
-                    state.messages.push(message.clone());
+                    Arc::make_mut(&mut state.messages).push(message.clone());
                 }
                 AgentEvent::ToolExecutionStart { tool_call_id, .. } => {
                     state.pending_tool_calls.insert(tool_call_id.clone());
