@@ -2,13 +2,13 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use async_openai::{config::OpenAIConfig, Client};
+use async_trait::async_trait;
 use futures::StreamExt;
 use oh_my_agentloop::{
-    Agent, AgentError, AgentEvent, AgentOptions, AgentTool, AgentToolResult,
-    AssistantMessage, ContentBlock, InitialAgentState, LlmContext, LlmEventStream, Message, Model,
-    ModelCost, StopReason, StreamEvent, StreamProvider, StreamRequest, TextContent, ThinkingContent,
+    Agent, AgentError, AgentEvent, AgentOptions, AgentTool, AgentToolResult, AssistantMessage,
+    ContentBlock, InitialAgentState, LlmContext, LlmEventStream, Message, Model, ModelCost,
+    StopReason, StreamEvent, StreamProvider, StreamRequest, TextContent, ThinkingContent,
     ThinkingLevel, ToolCallContent, Usage, UserContent, UserContentBlock,
 };
 use serde_json::{json, Value};
@@ -182,8 +182,7 @@ impl StreamProvider for KimiProvider {
             .map_err(|e| AgentError::Stream(format!("API request failed: {e}")))?;
 
         let model_clone = model.clone();
-        let (tx, rx) =
-            futures::channel::mpsc::unbounded::<Result<StreamEvent, AgentError>>();
+        let (tx, rx) = futures::channel::mpsc::unbounded::<Result<StreamEvent, AgentError>>();
 
         tokio::spawn(async move {
             let mut text_buf = String::new();
@@ -195,49 +194,48 @@ impl StreamProvider for KimiProvider {
             let mut has_sent_thinking_start = false;
             let mut has_sent_text_start = false;
 
-            let build_partial =
-                |text: &str,
-                 reasoning: &str,
-                 tool_calls: &[(String, String, String)],
-                 response_id: Option<String>|
-                 -> AssistantMessage {
-                    let mut content = Vec::new();
-                    if !reasoning.is_empty() {
-                        content.push(ContentBlock::Thinking(ThinkingContent {
-                            thinking: reasoning.into(),
-                            thinking_signature: None,
-                            redacted: Some(false),
+            let build_partial = |text: &str,
+                                 reasoning: &str,
+                                 tool_calls: &[(String, String, String)],
+                                 response_id: Option<String>|
+             -> AssistantMessage {
+                let mut content = Vec::new();
+                if !reasoning.is_empty() {
+                    content.push(ContentBlock::Thinking(ThinkingContent {
+                        thinking: reasoning.into(),
+                        thinking_signature: None,
+                        redacted: Some(false),
+                    }));
+                }
+                if !text.is_empty() {
+                    content.push(ContentBlock::Text(TextContent {
+                        text: text.into(),
+                        text_signature: None,
+                    }));
+                }
+                for (id, name, args_str) in tool_calls {
+                    if !id.is_empty() && !name.is_empty() {
+                        let arguments =
+                            serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
+                        content.push(ContentBlock::ToolCall(ToolCallContent {
+                            id: id.clone(),
+                            name: name.clone(),
+                            arguments,
                         }));
                     }
-                    if !text.is_empty() {
-                        content.push(ContentBlock::Text(TextContent {
-                            text: text.into(),
-                            text_signature: None,
-                        }));
-                    }
-                    for (id, name, args_str) in tool_calls {
-                        if !id.is_empty() && !name.is_empty() {
-                            let arguments =
-                                serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
-                            content.push(ContentBlock::ToolCall(ToolCallContent {
-                                id: id.clone(),
-                                name: name.clone(),
-                                arguments,
-                            }));
-                        }
-                    }
-                    AssistantMessage {
-                        content,
-                        model: model_clone.id.clone(),
-                        provider: model_clone.provider.clone(),
-                        api: model_clone.api.clone(),
-                        response_id,
-                        stop_reason: StopReason::Stop,
-                        error_message: None,
-                        usage: Usage::default(),
-                        timestamp: oh_my_agentloop::now_millis(),
-                    }
-                };
+                }
+                AssistantMessage {
+                    content,
+                    model: model_clone.id.clone(),
+                    provider: model_clone.provider.clone(),
+                    api: model_clone.api.clone(),
+                    response_id,
+                    stop_reason: StopReason::Stop,
+                    error_message: None,
+                    usage: Usage::default(),
+                    timestamp: oh_my_agentloop::now_millis(),
+                }
+            };
 
             while let Some(chunk_result) = openai_stream.next().await {
                 let chunk_result: Result<Value, _> = chunk_result;
@@ -429,8 +427,7 @@ impl StreamProvider for KimiProvider {
             }
             for (id, name, args_str) in tool_call_parts {
                 if !id.is_empty() && !name.is_empty() {
-                    let arguments =
-                        serde_json::from_str(&args_str).unwrap_or_else(|_| json!({}));
+                    let arguments = serde_json::from_str(&args_str).unwrap_or_else(|_| json!({}));
                     content.push(ContentBlock::ToolCall(ToolCallContent {
                         id,
                         name,
@@ -504,7 +501,10 @@ impl AgentTool for ReadFileTool {
         _on_update: Option<Box<dyn Fn(AgentToolResult) + Send + Sync>>,
     ) -> Result<AgentToolResult, AgentError> {
         let path = params["path"].as_str().unwrap_or_default();
-        let level = params.get("level").and_then(|v| v.as_str()).unwrap_or("none");
+        let level = params
+            .get("level")
+            .and_then(|v| v.as_str())
+            .unwrap_or("none");
 
         let output = tokio::process::Command::new("rtk")
             .arg("read")
@@ -809,7 +809,10 @@ impl AgentTool for GrepTool {
     ) -> Result<AgentToolResult, AgentError> {
         let pattern = params["pattern"].as_str().unwrap_or_default();
         let path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-        let file_type = params.get("file_type").and_then(|v| v.as_str()).unwrap_or("");
+        let file_type = params
+            .get("file_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
         let mut cmd = tokio::process::Command::new("rtk");
         cmd.arg("grep").arg(pattern).arg(path);
@@ -943,31 +946,31 @@ async fn main() {
                         StreamEvent::Done { .. } => println!(),
                         _ => {}
                     },
-            AgentEvent::ToolExecutionStart { tool_name, .. } => {
-                println!("\n🔧  Using tool: {tool_name}...");
-            }
-            AgentEvent::ToolExecutionEnd {
-                tool_name,
-                is_error,
-                ..
-            } => {
-                if is_error {
-                    println!("❌  Tool {tool_name} failed.");
-                } else {
-                    println!("✅  Tool {tool_name} completed.");
+                    AgentEvent::ToolExecutionStart { tool_name, .. } => {
+                        println!("\n🔧  Using tool: {tool_name}...");
+                    }
+                    AgentEvent::ToolExecutionEnd {
+                        tool_name,
+                        is_error,
+                        ..
+                    } => {
+                        if is_error {
+                            println!("❌  Tool {tool_name} failed.");
+                        } else {
+                            println!("✅  Tool {tool_name} completed.");
+                        }
+                    }
+                    AgentEvent::RunCompleted { .. } => {
+                        println!();
+                    }
+                    AgentEvent::RunFailed { error_message, .. } => {
+                        println!("\n💥  Run failed: {error_message}");
+                    }
+                    _ => {}
                 }
             }
-            AgentEvent::RunCompleted { .. } => {
-                println!();
-            }
-            AgentEvent::RunFailed { error_message, .. } => {
-                println!("\n💥  Run failed: {error_message}");
-            }
-            _ => {}
         }
-    }
-    }
-});
+    });
 
     println!("╔═════════════════════════════════════════════════════════════════╗");
     println!("║             Coding Agent Example (Kimi K2.6 + RTK)              ║");

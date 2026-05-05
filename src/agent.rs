@@ -660,7 +660,15 @@ impl Agent {
                     let config = agent.create_loop_config(skip_initial_steering_poll);
                     let stream_provider = Arc::clone(&agent.inner.stream_provider);
                     let emitter = agent.create_emitter();
-                    run_agent_loop(messages, context, config, &emitter, cancel, &*stream_provider).await
+                    run_agent_loop(
+                        messages,
+                        context,
+                        config,
+                        &emitter,
+                        cancel,
+                        &*stream_provider,
+                    )
+                    .await
                 })
             })
             .await?;
@@ -676,7 +684,8 @@ impl Agent {
                     let config = agent.create_loop_config(false);
                     let stream_provider = Arc::clone(&agent.inner.stream_provider);
                     let emitter = agent.create_emitter();
-                    run_agent_loop_continue(context, config, &emitter, cancel, &*stream_provider).await
+                    run_agent_loop_continue(context, config, &emitter, cancel, &*stream_provider)
+                        .await
                 })
             })
             .await?;

@@ -181,7 +181,10 @@ pub fn noop_on_payload() -> OnPayloadFn {
 }
 
 /// Two LLM rounds: first `Done` uses `first`, second uses `second` (tool-use + follow-up parity).
-pub fn stream_two_rounds(first: AssistantMessage, second: AssistantMessage) -> Arc<dyn StreamProvider> {
+pub fn stream_two_rounds(
+    first: AssistantMessage,
+    second: AssistantMessage,
+) -> Arc<dyn StreamProvider> {
     let call_index = Arc::new(AtomicUsize::new(0));
     let f: StreamFn = Arc::new(move |_model, _ctx, _req| {
         let first = first.clone();

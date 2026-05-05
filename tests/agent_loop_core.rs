@@ -214,7 +214,13 @@ async fn stream_options_include_resolved_key_session_transport_temperature_token
         tools: vec![],
     };
     let cancel = CancellationToken::new();
-    let rx = agent_loop(vec![user_message("hi")], ctx, config, cancel, Arc::new(StreamFnAdapter(stream_fn)));
+    let rx = agent_loop(
+        vec![user_message("hi")],
+        ctx,
+        config,
+        cancel,
+        Arc::new(StreamFnAdapter(stream_fn)),
+    );
     collect_loop_events(rx).await;
     let opts = captured.lock().unwrap().take().expect("options captured");
     assert_eq!(opts.api_key.as_deref(), Some("key-from-fn"));
@@ -358,7 +364,7 @@ async fn run_agent_loop_continue_emits_only_new_assistant_message_events() {
     });
     let cancel = CancellationToken::new();
     let stream_fn = stream_done_only(assistant_text("Response", &model));
-        let outcome = run_agent_loop_continue(ctx, config, &emitter, cancel, &*stream_fn)
+    let outcome = run_agent_loop_continue(ctx, config, &emitter, cancel, &*stream_fn)
         .await
         .expect("continue ok");
     let RunOutcome::Completed {

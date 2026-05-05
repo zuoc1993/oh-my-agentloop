@@ -849,7 +849,13 @@ async fn steering_messages_injected_only_after_all_tool_calls_finish() {
         tools: vec![tool.clone()],
     };
     let cancel = CancellationToken::new();
-    let rx = agent_loop(vec![user_message("start")], ctx, config, cancel, Arc::new(StreamFnAdapter(stream_fn)));
+    let rx = agent_loop(
+        vec![user_message("start")],
+        ctx,
+        config,
+        cancel,
+        Arc::new(StreamFnAdapter(stream_fn)),
+    );
     let events = collect_loop_events(rx).await;
     let ran: Vec<String> = executed
         .lock()

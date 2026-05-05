@@ -155,7 +155,9 @@ async fn wait_for_idle_waits_for_async_subscribers_on_message_end() {
 #[tokio::test]
 async fn second_prompt_while_streaming_returns_already_processing() {
     let model = test_model();
-    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(hanging_partial_stream(model.clone())))));
+    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(
+        hanging_partial_stream(model.clone()),
+    ))));
 
     let first = tokio::spawn({
         let a = agent.clone();
@@ -175,7 +177,9 @@ async fn second_prompt_while_streaming_returns_already_processing() {
 #[tokio::test]
 async fn continue_while_streaming_returns_already_processing() {
     let model = test_model();
-    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(hanging_partial_stream(model.clone())))));
+    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(
+        hanging_partial_stream(model.clone()),
+    ))));
 
     let first = tokio::spawn({
         let a = agent.clone();
@@ -427,7 +431,9 @@ async fn forwards_on_payload_to_stream_options() {
 #[tokio::test]
 async fn abort_cancels_in_flight_run_and_clears_signal() {
     let model = test_model();
-    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(hanging_partial_stream(model.clone())))));
+    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(
+        hanging_partial_stream(model.clone()),
+    ))));
 
     let run = tokio::spawn({
         let a = agent.clone();

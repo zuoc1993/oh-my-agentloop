@@ -37,7 +37,15 @@ pub fn agent_loop(
             }
         });
 
-        let _ = run_agent_loop(prompts, context, config, &emitter, cancel, &*stream_provider).await;
+        let _ = run_agent_loop(
+            prompts,
+            context,
+            config,
+            &emitter,
+            cancel,
+            &*stream_provider,
+        )
+        .await;
     });
 
     rx
@@ -429,9 +437,14 @@ async fn run_loop(
             }
 
             // Stream assistant response
-            let message =
-                stream_assistant_response(current_context, config, cancel, emitter, stream_provider)
-                    .await?;
+            let message = stream_assistant_response(
+                current_context,
+                config,
+                cancel,
+                emitter,
+                stream_provider,
+            )
+            .await?;
             Arc::make_mut(new_messages).push(AgentMessage::Assistant(message.clone()));
 
             if message.stop_reason == StopReason::Error
@@ -546,7 +559,13 @@ async fn stream_assistant_response(
 ) -> Result<AssistantMessage, AgentError> {
     // Apply context transform if configured (AgentMessage[] → AgentMessage[])
     let messages = if let Some(ref transform) = config.transform_context {
-        Arc::new(transform(Arc::unwrap_or_clone(context.messages.clone()), cancel.clone()).await)
+        Arc::new(
+            transform(
+                Arc::unwrap_or_clone(context.messages.clone()),
+                cancel.clone(),
+            )
+            .await,
+        )
     } else {
         context.messages.clone()
     };
@@ -643,8 +662,7 @@ async fn stream_assistant_response(
                 }
 
                 partial_message = Some(partial.clone());
-                Arc::make_mut(&mut context.messages)
-                    .push(AgentMessage::Assistant(partial.clone()));
+                Arc::make_mut(&mut context.messages).push(AgentMessage::Assistant(partial.clone()));
                 added_partial = true;
                 emitter
                     .emit(AgentEvent::MessageStart {

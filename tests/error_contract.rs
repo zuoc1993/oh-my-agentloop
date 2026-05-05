@@ -501,7 +501,10 @@ async fn agent_prompt_returns_runtime_error_and_keeps_failure_message() {
     let stream_fn: StreamFn = Arc::new(|_model, _ctx, _request| {
         Box::pin(async move { Err(AgentError::Stream("boom".into())) })
     });
-    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(stream_fn)), model.clone()));
+    let agent = Agent::new(agent_options(
+        Arc::new(StreamFnAdapter(stream_fn)),
+        model.clone(),
+    ));
 
     let err = agent.prompt_text("hello", None).await.unwrap_err();
     assert!(matches!(err, AgentError::Stream(message) if message == "boom"));
@@ -534,7 +537,10 @@ async fn agent_prompt_returns_provider_error_terminal_as_runtime_error() {
         })
     });
 
-    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(stream_fn)), model.clone()));
+    let agent = Agent::new(agent_options(
+        Arc::new(StreamFnAdapter(stream_fn)),
+        model.clone(),
+    ));
 
     let err = agent.prompt_text("hello", None).await.unwrap_err();
     assert!(matches!(err, AgentError::Stream(message) if message == "provider boom"));
@@ -568,7 +574,10 @@ async fn agent_prompt_normalizes_missing_provider_error_message() {
         })
     });
 
-    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(stream_fn)), model.clone()));
+    let agent = Agent::new(agent_options(
+        Arc::new(StreamFnAdapter(stream_fn)),
+        model.clone(),
+    ));
     let events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
     let events_sub = events.clone();
     let _sub = agent.subscribe(move |event, _cancel| {
@@ -614,7 +623,10 @@ async fn completed_terminal_event_wins_over_late_cancel() {
         })
     });
 
-    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(stream_fn)), model.clone()));
+    let agent = Agent::new(agent_options(
+        Arc::new(StreamFnAdapter(stream_fn)),
+        model.clone(),
+    ));
     let events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
     let events_sub = events.clone();
     let _sub = agent.subscribe(move |event, _cancel| {
@@ -659,7 +671,10 @@ async fn agent_prompt_returns_aborted_for_provider_supplied_aborted_terminal() {
         })
     });
 
-    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(stream_fn)), model.clone()));
+    let agent = Agent::new(agent_options(
+        Arc::new(StreamFnAdapter(stream_fn)),
+        model.clone(),
+    ));
     let events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
     let events_sub = events.clone();
     let _sub = agent.subscribe(move |event, _cancel| {
@@ -691,7 +706,10 @@ async fn agent_prompt_returns_aborted_for_provider_construction_abort() {
     let stream_fn: StreamFn =
         Arc::new(|_model, _ctx, _request| Box::pin(async move { Err(AgentError::Aborted) }));
 
-    let agent = Agent::new(agent_options(Arc::new(StreamFnAdapter(stream_fn)), model.clone()));
+    let agent = Agent::new(agent_options(
+        Arc::new(StreamFnAdapter(stream_fn)),
+        model.clone(),
+    ));
     let events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
     let events_sub = events.clone();
     let _sub = agent.subscribe(move |event, _cancel| {
