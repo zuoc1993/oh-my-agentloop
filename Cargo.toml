@@ -29,6 +29,8 @@ tracing = { version = "0.1", default-features = false, features = ["attributes",
 
 [dev-dependencies]
 tokio-test = "0.4"
+reqwest = { version = "0.12", features = ["json"] }
+bytes = "1"
 
 [lints.rust]
 unsafe_code = "forbid"
