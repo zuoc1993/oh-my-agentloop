@@ -1,12 +1,15 @@
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use async_openai::{config::OpenAIConfig, Client};
+use futures::StreamExt;
 use oh_my_agentloop::{
-    Agent, AgentError, AgentEvent, AgentMessage, AgentOptions, AgentTool, AgentToolResult,
+    Agent, AgentError, AgentEvent, AgentOptions, AgentTool, AgentToolResult,
     AssistantMessage, ContentBlock, InitialAgentState, LlmContext, LlmEventStream, Message, Model,
-    ModelCost, StopReason, StreamEvent, StreamProvider, StreamRequest, TextContent, ThinkingLevel,
-    ToolCallContent, Usage, UserContent, UserContentBlock,
+    ModelCost, StopReason, StreamEvent, StreamProvider, StreamRequest, TextContent, ThinkingContent,
+    ThinkingLevel, ToolCallContent, Usage, UserContent, UserContentBlock,
 };
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
@@ -38,23 +41,103 @@ fn check_rtk() {
 }
 
 // ============================================================
-// 1. Kimi K2.6 Stream Provider (OpenAI-compatible, non-streaming)
+// 1. Kimi K2.6 Stream Provider (async-openai BYOT + streaming + thinking)
 // ============================================================
 
 struct KimiProvider {
-    client: reqwest::Client,
-    api_key: String,
-    base_url: String,
+    client: Client<OpenAIConfig>,
 }
 
 impl KimiProvider {
     fn new(api_key: String) -> Self {
+        let config = OpenAIConfig::new()
+            .with_api_key(api_key)
+            .with_api_base("https://api.moonshot.cn/v1");
         Self {
-            client: reqwest::Client::new(),
-            api_key,
-            base_url: "https://api.moonshot.cn/v1".into(),
+            client: Client::with_config(config),
         }
     }
+}
+
+fn convert_messages(messages: Vec<Message>) -> Vec<Value> {
+    messages
+        .into_iter()
+        .map(|m| match m {
+            Message::User(u) => {
+                let content = match &u.content {
+                    UserContent::Plain(text) => Value::String(text.clone()),
+                    UserContent::Blocks(blocks) => Value::Array(
+                        blocks
+                            .iter()
+                            .map(|b| match b {
+                                UserContentBlock::Text(t) => {
+                                    json!({"type": "text", "text": t.text})
+                                }
+                                UserContentBlock::Image(i) => json!({
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": format!("data:{};base64,{}", i.mime_type, i.data)
+                                    }
+                                }),
+                            })
+                            .collect(),
+                    ),
+                };
+                json!({"role": "user", "content": content})
+            }
+            Message::Assistant(a) => {
+                let mut text_parts = Vec::new();
+                let mut reasoning_parts = Vec::new();
+                let mut tool_calls_json = Vec::new();
+                for block in &a.content {
+                    match block {
+                        ContentBlock::Text(t) => text_parts.push(t.text.clone()),
+                        ContentBlock::Thinking(t) => reasoning_parts.push(t.thinking.clone()),
+                        ContentBlock::ToolCall(tc) => {
+                            tool_calls_json.push(json!({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": tc.arguments.to_string()
+                                }
+                            }));
+                        }
+                        _ => {}
+                    }
+                }
+                let text = text_parts.join("");
+                let reasoning = reasoning_parts.join("");
+                let mut msg = json!({"role": "assistant"});
+                if !text.is_empty() {
+                    msg["content"] = Value::String(text);
+                }
+                if !reasoning.is_empty() {
+                    msg["reasoning_content"] = Value::String(reasoning);
+                }
+                if !tool_calls_json.is_empty() {
+                    msg["tool_calls"] = Value::Array(tool_calls_json);
+                }
+                msg
+            }
+            Message::ToolResult(tr) => {
+                let content = tr
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text(t) => Some(t.text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                json!({
+                    "role": "tool",
+                    "tool_call_id": tr.tool_call_id,
+                    "content": content
+                })
+            }
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -65,84 +148,7 @@ impl StreamProvider for KimiProvider {
         ctx: LlmContext,
         _req: StreamRequest,
     ) -> Result<LlmEventStream, AgentError> {
-        let url = format!("{}/chat/completions", self.base_url);
-
-        // Convert oh-my-agentloop Message[] to OpenAI format
-        let messages: Vec<Value> = ctx
-            .messages
-            .into_iter()
-            .map(|m| match m {
-                Message::User(u) => {
-                    let content = match &u.content {
-                        UserContent::Plain(text) => Value::String(text.clone()),
-                        UserContent::Blocks(blocks) => Value::Array(
-                            blocks
-                                .iter()
-                                .map(|b| match b {
-                                    UserContentBlock::Text(t) => {
-                                        json!({"type": "text", "text": t.text})
-                                    }
-                                    UserContentBlock::Image(i) => json!({
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": format!("data:{};base64,{}", i.mime_type, i.data)
-                                        }
-                                    }),
-                                })
-                                .collect(),
-                        ),
-                    };
-                    json!({"role": "user", "content": content})
-                }
-                Message::Assistant(a) => {
-                    let mut text_parts = Vec::new();
-                    let mut tool_calls_json = Vec::new();
-                    for block in &a.content {
-                        match block {
-                            ContentBlock::Text(t) => text_parts.push(t.text.clone()),
-                            ContentBlock::ToolCall(tc) => {
-                                tool_calls_json.push(json!({
-                                    "id": tc.id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": tc.name,
-                                        "arguments": tc.arguments.to_string()
-                                    }
-                                }));
-                            }
-                            _ => {}
-                        }
-                    }
-                    let text = text_parts.join("");
-                    let mut msg = json!({"role": "assistant"});
-                    if !text.is_empty() {
-                        msg["content"] = Value::String(text);
-                    }
-                    if !tool_calls_json.is_empty() {
-                        msg["tool_calls"] = Value::Array(tool_calls_json);
-                    }
-                    msg
-                }
-                Message::ToolResult(tr) => {
-                    let content = tr
-                        .content
-                        .iter()
-                        .filter_map(|b| match b {
-                            ContentBlock::Text(t) => Some(t.text.clone()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    json!({
-                        "role": "tool",
-                        "tool_call_id": tr.tool_call_id,
-                        "content": content
-                    })
-                }
-            })
-            .collect();
-
-        // Convert tools to OpenAI function-calling format
+        let messages = convert_messages(ctx.messages);
         let tools: Vec<Value> = ctx
             .tools
             .into_iter()
@@ -161,116 +167,294 @@ impl StreamProvider for KimiProvider {
         let mut body = json!({
             "model": model.id,
             "messages": messages,
-            "thinking": { "type": "disabled" },
+            "stream": true,
+            "thinking": { "type": "enabled" },
         });
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);
         }
 
-        let response = self
+        let mut openai_stream = self
             .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
-            .send()
+            .chat()
+            .create_stream_byot(body)
             .await
-            .map_err(|e| AgentError::Stream(format!("HTTP request failed: {e}")))?;
+            .map_err(|e| AgentError::Stream(format!("API request failed: {e}")))?;
 
-        let status = response.status();
-        let response_json: Value = response
-            .json()
-            .await
-            .map_err(|e| AgentError::Stream(format!("Failed to parse JSON response: {e}")))?;
+        let model_clone = model.clone();
+        let (tx, rx) =
+            futures::channel::mpsc::unbounded::<Result<StreamEvent, AgentError>>();
 
-        if !status.is_success() {
-            let error_msg = response_json
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("Unknown API error");
-            return Err(AgentError::Stream(format!("API error: {error_msg}")));
-        }
+        tokio::spawn(async move {
+            let mut text_buf = String::new();
+            let mut reasoning_buf = String::new();
+            let mut tool_call_parts: Vec<(String, String, String)> = Vec::new();
+            let mut response_id: Option<String> = None;
+            let mut finish_reason: Option<String> = None;
+            let mut has_sent_start = false;
+            let mut has_sent_thinking_start = false;
+            let mut has_sent_text_start = false;
 
-        // Parse response into AssistantMessage
-        let choice = response_json
-            .get("choices")
-            .and_then(|c| c.as_array())
-            .and_then(|a| a.first())
-            .ok_or_else(|| AgentError::Stream("No choices in API response".into()))?;
+            let build_partial =
+                |text: &str,
+                 reasoning: &str,
+                 tool_calls: &[(String, String, String)],
+                 response_id: Option<String>|
+                 -> AssistantMessage {
+                    let mut content = Vec::new();
+                    if !reasoning.is_empty() {
+                        content.push(ContentBlock::Thinking(ThinkingContent {
+                            thinking: reasoning.into(),
+                            thinking_signature: None,
+                            redacted: Some(false),
+                        }));
+                    }
+                    if !text.is_empty() {
+                        content.push(ContentBlock::Text(TextContent {
+                            text: text.into(),
+                            text_signature: None,
+                        }));
+                    }
+                    for (id, name, args_str) in tool_calls {
+                        if !id.is_empty() && !name.is_empty() {
+                            let arguments =
+                                serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
+                            content.push(ContentBlock::ToolCall(ToolCallContent {
+                                id: id.clone(),
+                                name: name.clone(),
+                                arguments,
+                            }));
+                        }
+                    }
+                    AssistantMessage {
+                        content,
+                        model: model_clone.id.clone(),
+                        provider: model_clone.provider.clone(),
+                        api: model_clone.api.clone(),
+                        response_id,
+                        stop_reason: StopReason::Stop,
+                        error_message: None,
+                        usage: Usage::default(),
+                        timestamp: oh_my_agentloop::now_millis(),
+                    }
+                };
 
-        let message = choice
-            .get("message")
-            .ok_or_else(|| AgentError::Stream("No message in API choice".into()))?;
+            while let Some(chunk_result) = openai_stream.next().await {
+                let chunk_result: Result<Value, _> = chunk_result;
+                let chunk = match chunk_result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx.unbounded_send(Err(AgentError::Stream(format!(
+                            "API stream error: {e}"
+                        ))));
+                        return;
+                    }
+                };
 
-        let mut content_blocks = Vec::new();
+                if let Some(id) = chunk.get("id").and_then(|i| i.as_str()) {
+                    response_id = Some(id.to_string());
+                }
 
-        if let Some(content) = message.get("content").and_then(|c| c.as_str()) {
-            if !content.is_empty() {
-                content_blocks.push(ContentBlock::Text(TextContent {
-                    text: content.into(),
+                let choice = match chunk
+                    .get("choices")
+                    .and_then(|c| c.as_array())
+                    .and_then(|a| a.first())
+                {
+                    Some(c) => c,
+                    None => continue,
+                };
+
+                if let Some(reason) = choice.get("finish_reason").and_then(|f| f.as_str()) {
+                    finish_reason = Some(reason.to_string());
+                }
+
+                let delta = match choice.get("delta") {
+                    Some(d) => d,
+                    None => continue,
+                };
+
+                if let Some(rc) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
+                    if !rc.is_empty() {
+                        if !has_sent_start {
+                            let partial = build_partial(
+                                &text_buf,
+                                &reasoning_buf,
+                                &tool_call_parts,
+                                response_id.clone(),
+                            );
+                            let _ = tx.unbounded_send(Ok(StreamEvent::Start { partial }));
+                            has_sent_start = true;
+                        }
+                        if !has_sent_thinking_start {
+                            let partial = build_partial(
+                                &text_buf,
+                                &reasoning_buf,
+                                &tool_call_parts,
+                                response_id.clone(),
+                            );
+                            let _ = tx.unbounded_send(Ok(StreamEvent::ThinkingStart {
+                                content_index: 0,
+                                partial,
+                            }));
+                            has_sent_thinking_start = true;
+                        }
+                        reasoning_buf.push_str(rc);
+                        let partial = build_partial(
+                            &text_buf,
+                            &reasoning_buf,
+                            &tool_call_parts,
+                            response_id.clone(),
+                        );
+                        let _ = tx.unbounded_send(Ok(StreamEvent::ThinkingDelta {
+                            content_index: 0,
+                            delta: rc.to_string(),
+                            partial,
+                        }));
+                    }
+                }
+
+                if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                    if !content.is_empty() {
+                        if !has_sent_start {
+                            let partial = build_partial(
+                                &text_buf,
+                                &reasoning_buf,
+                                &tool_call_parts,
+                                response_id.clone(),
+                            );
+                            let _ = tx.unbounded_send(Ok(StreamEvent::Start { partial }));
+                            has_sent_start = true;
+                        }
+                        if !has_sent_text_start {
+                            let partial = build_partial(
+                                &text_buf,
+                                &reasoning_buf,
+                                &tool_call_parts,
+                                response_id.clone(),
+                            );
+                            let idx = if reasoning_buf.is_empty() { 0 } else { 1 };
+                            let _ = tx.unbounded_send(Ok(StreamEvent::TextStart {
+                                content_index: idx,
+                                partial,
+                            }));
+                            has_sent_text_start = true;
+                        }
+                        text_buf.push_str(content);
+                        let partial = build_partial(
+                            &text_buf,
+                            &reasoning_buf,
+                            &tool_call_parts,
+                            response_id.clone(),
+                        );
+                        let idx = if reasoning_buf.is_empty() { 0 } else { 1 };
+                        let _ = tx.unbounded_send(Ok(StreamEvent::TextDelta {
+                            content_index: idx,
+                            delta: content.to_string(),
+                            partial,
+                        }));
+                    }
+                }
+
+                if let Some(tc_deltas) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                    for tc_delta in tc_deltas {
+                        let index =
+                            tc_delta.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                        while tool_call_parts.len() <= index {
+                            tool_call_parts.push((String::new(), String::new(), String::new()));
+                        }
+                        if let Some(id) = tc_delta.get("id").and_then(|i| i.as_str()) {
+                            tool_call_parts[index].0 = id.to_string();
+                        }
+                        if let Some(func) = tc_delta.get("function") {
+                            if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                                tool_call_parts[index].1 = name.to_string();
+                            }
+                            if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
+                                tool_call_parts[index].2.push_str(args);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let stop_reason = finish_reason
+                .map(|r| match r.as_str() {
+                    "stop" => StopReason::Stop,
+                    "length" => StopReason::Length,
+                    "tool_calls" => StopReason::ToolUse,
+                    _ => StopReason::Stop,
+                })
+                .unwrap_or(StopReason::Stop);
+
+            if has_sent_thinking_start {
+                let partial = build_partial(
+                    &text_buf,
+                    &reasoning_buf,
+                    &tool_call_parts,
+                    response_id.clone(),
+                );
+                let _ = tx.unbounded_send(Ok(StreamEvent::ThinkingEnd {
+                    content_index: 0,
+                    content: reasoning_buf.clone(),
+                    partial,
+                }));
+            }
+            if has_sent_text_start {
+                let partial = build_partial(
+                    &text_buf,
+                    &reasoning_buf,
+                    &tool_call_parts,
+                    response_id.clone(),
+                );
+                let _ = tx.unbounded_send(Ok(StreamEvent::TextEnd {
+                    content_index: if reasoning_buf.is_empty() { 0 } else { 1 },
+                    content: text_buf.clone(),
+                    partial,
+                }));
+            }
+
+            let mut content = Vec::new();
+            if !reasoning_buf.is_empty() {
+                content.push(ContentBlock::Thinking(ThinkingContent {
+                    thinking: reasoning_buf,
+                    thinking_signature: None,
+                    redacted: Some(false),
+                }));
+            }
+            if !text_buf.is_empty() {
+                content.push(ContentBlock::Text(TextContent {
+                    text: text_buf,
                     text_signature: None,
                 }));
             }
-        }
-
-        if let Some(tool_calls) = message.get("tool_calls").and_then(|c| c.as_array()) {
-            for tc in tool_calls {
-                let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-                let name = tc
-                    .get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let args_str = tc
-                    .get("function")
-                    .and_then(|f| f.get("arguments"))
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("{}");
-                let arguments =
-                    serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
-
-                content_blocks.push(ContentBlock::ToolCall(ToolCallContent {
-                    id,
-                    name,
-                    arguments,
-                }));
+            for (id, name, args_str) in tool_call_parts {
+                if !id.is_empty() && !name.is_empty() {
+                    let arguments =
+                        serde_json::from_str(&args_str).unwrap_or_else(|_| json!({}));
+                    content.push(ContentBlock::ToolCall(ToolCallContent {
+                        id,
+                        name,
+                        arguments,
+                    }));
+                }
             }
-        }
 
-        let stop_reason = choice
-            .get("finish_reason")
-            .and_then(|f| f.as_str())
-            .map(|r| match r {
-                "stop" => StopReason::Stop,
-                "length" => StopReason::Length,
-                "tool_calls" => StopReason::ToolUse,
-                _ => StopReason::Stop,
-            })
-            .unwrap_or(StopReason::Stop);
+            let message = AssistantMessage {
+                content,
+                model: model_clone.id,
+                provider: model_clone.provider,
+                api: model_clone.api,
+                response_id,
+                stop_reason,
+                error_message: None,
+                usage: Usage::default(),
+                timestamp: oh_my_agentloop::now_millis(),
+            };
 
-        let assistant_message = AssistantMessage {
-            content: content_blocks,
-            model: model.id.clone(),
-            provider: model.provider.clone(),
-            api: model.api.clone(),
-            response_id: response_json.get("id").and_then(|i| i.as_str()).map(|s| s.into()),
-            stop_reason,
-            error_message: None,
-            usage: Usage::default(),
-            timestamp: oh_my_agentloop::now_millis(),
-        };
+            let _ = tx.unbounded_send(Ok(StreamEvent::Done { message }));
+        });
 
-        let stream = futures::stream::iter(vec![
-            Ok(StreamEvent::Start {
-                partial: assistant_message.clone(),
-            }),
-            Ok(StreamEvent::Done {
-                message: assistant_message,
-            }),
-        ]);
-
-        Ok(Box::pin(stream) as LlmEventStream)
+        Ok(Box::pin(rx) as LlmEventStream)
     }
 }
 
@@ -684,28 +868,6 @@ fn model() -> Model {
     }
 }
 
-fn print_assistant_reply(state: &oh_my_agentloop::AgentState) {
-    if let Some(AgentMessage::Assistant(a)) = state
-        .messages
-        .iter()
-        .rev()
-        .find(|m| matches!(m, AgentMessage::Assistant(_)))
-    {
-        let mut has_text = false;
-        for block in &a.content {
-            if let ContentBlock::Text(t) = block {
-                if !t.text.trim().is_empty() {
-                    println!("🤖 {}", t.text.trim());
-                    has_text = true;
-                }
-            }
-        }
-        if !has_text && a.stop_reason == StopReason::ToolUse {
-            println!("🤖 (using tools...)");
-        }
-    }
-}
-
 // ============================================================
 // 4. Main
 // ============================================================
@@ -752,10 +914,37 @@ async fn main() {
     let agent = Agent::new(options);
 
     // Subscribe to events for real-time feedback
-    let _sub = agent.subscribe(|event, _cancel| async move {
-        match event {
+    let has_thinking = Arc::new(AtomicBool::new(false));
+
+    let _sub = agent.subscribe({
+        let has_thinking = Arc::clone(&has_thinking);
+        move |event, _cancel| {
+            let has_thinking = Arc::clone(&has_thinking);
+            async move {
+                match event {
+                    AgentEvent::MessageUpdate { stream_event, .. } => match stream_event {
+                        StreamEvent::Start { .. } => print!("🤖 "),
+                        StreamEvent::ThinkingStart { .. } => {
+                            has_thinking.store(true, Ordering::Relaxed);
+                        }
+                        StreamEvent::ThinkingDelta { delta, .. } => {
+                            eprint!("\x1b[90m{delta}\x1b[0m");
+                            let _ = std::io::Write::flush(&mut std::io::stderr());
+                        }
+                        StreamEvent::TextStart { .. } => {
+                            if has_thinking.swap(false, Ordering::Relaxed) {
+                                println!();
+                            }
+                        }
+                        StreamEvent::TextDelta { delta, .. } => {
+                            print!("{delta}");
+                            let _ = std::io::Write::flush(&mut std::io::stdout());
+                        }
+                        StreamEvent::Done { .. } => println!(),
+                        _ => {}
+                    },
             AgentEvent::ToolExecutionStart { tool_name, .. } => {
-                println!("🔧  Using tool: {tool_name}...");
+                println!("\n🔧  Using tool: {tool_name}...");
             }
             AgentEvent::ToolExecutionEnd {
                 tool_name,
@@ -769,14 +958,16 @@ async fn main() {
                 }
             }
             AgentEvent::RunCompleted { .. } => {
-                println!("🏁  Done.\n");
+                println!();
             }
             AgentEvent::RunFailed { error_message, .. } => {
-                println!("💥  Run failed: {error_message}\n");
+                println!("\n💥  Run failed: {error_message}");
             }
             _ => {}
         }
-    });
+    }
+    }
+});
 
     println!("╔═════════════════════════════════════════════════════════════════╗");
     println!("║             Coding Agent Example (Kimi K2.6 + RTK)              ║");
@@ -808,7 +999,5 @@ async fn main() {
             eprintln!("Error: {e}");
             continue;
         }
-
-        print_assistant_reply(&agent.state());
     }
 }
